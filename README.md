@@ -1,116 +1,188 @@
-# Atari 7800 disassembly toolkit
+# Karateka (Atari 7800): a disassembly, what it found, and patches
 
-Tools and hard-won notes for taking apart 7800 cartridges, extracted from a
-complete byte-identical disassembly of a 128K commercial game.
+Karateka's 1987 7800 port taken apart from the outside in, and put back
+together with about forty fixes. No cartridge data is here in any form --
+see [No ROM ships with this](#no-rom-ships-with-this).
 
-Nothing here is specific to that game. The cartridge model was tested against
-**2,664 retail and homebrew images** and lays out all but four of them — including Activision's 8K-granular mapper and bankset cartridges, whose two halves are read separately with `side=`; the
-disassembler reproduces the hand-verified 128K disassembly byte for byte while
-also handling unbanked 4K-48K ROMs.
+The short version of what came out of it: **the game is a Forth machine**,
+its slowness is a scheduler and not a lack of cycles, its world scrolls
+through a five-segment odometer that nothing else had described, its
+ending is present but missing one rule, and every build anyone has ever
+made of it -- including the first forty of mine -- would have failed on
+real NTSC hardware for a reason no emulator reveals.
 
-MIT licensed, which covers the code and the notes. It cannot grant rights
-over the games the tools analyse, and it does not need to -- see `NOTICE`
-and the section below.
+## What is in here
 
-## No ROM ships with this
+| | |
+|---|---|
+| [docs/karateka-map.md](docs/karateka-map.md) | **What the machine is.** The Forth image, the scheduler, RAM, the scroll machinery, the odometer, the stages, the audio driver, the cartridge signature. The reference. |
+| [docs/fixing-karateka.md](docs/fixing-karateka.md) | **How each fix got to its shape**, wrong turns kept in deliberately. Longer than the map, because most of the work was being wrong first. |
+| [patches/karateka.py](patches/karateka.py) | All 48 fixes, as annotated source. Every one carries its own reasoning and what it was measured against. |
+| `dist/` | 50 BPS patches and one `.abp` bundle -- the patches themselves, ready to apply. |
+| `probes/` | 43 Lua probes for MAME. Most findings below came from one of these rather than from reading. |
+| `tools/` | The general 7800 toolkit this grew out of: disassembler, cartridge model, graphics and music extraction, patch formats, signing. |
+| `docs/` | Eleven more documents on the hardware, the formats and the method. |
 
-Not one cartridge byte is in this repository, and that is enforced rather
-than promised: `.gitignore` refuses every ROM extension, `portkit.py`
-refuses a recipe carrying embedded data, and the patch-set format ships
-section CRCs instead of the bytes they check. Decoded artwork counts as
-cartridge bytes too, so the rendered sprite sheets and screenshots are
-left out as well -- every one of them regenerates from your own dump.
+## What it found
 
-Supply your own copy of the game you are working on. For the Karateka
-work specifically, that is the NTSC release, crc32 `FEC21472`:
+**It is an indirect-threaded Forth image, not hand-written 6502.** `NEXT`
+at `$401E`, `DOCOL` at `$4C3E`, `EXIT` at `$4D86`, a data stack in zero
+page indexed by X from a base of `$CF`. Almost every "routine" is a list
+of addresses. That single fact reorganised everything after it: a
+conventional disassembly of this ROM is mostly a disassembly of data.
 
-```
-export KARATEKA_ROM="/path/to/Karateka (NTSC) (Atari) (1987) (FEC21472).a78"
-python patches/karateka.py --build
-```
+**The slowness is a scheduler.** `w_A59C` runs nine slots, one entity per
+round with a frame of padding each, so a decision costs 13 frames. Probed
+across real fights, **87.5% of those slots hold the do-nothing word** --
+the loop spends most of its time waiting on entities that have nothing to
+say. That is what fixes 27-36 attack, and why reactions can be made ~5
+frames without touching game speed.
 
-The tools also look for it beside the toolkit and a few levels down from
-the parent directory, so a normal library layout usually needs no
-configuration at all.
+**How the world scrolls, completely.** Everything that moves goes through
+one primitive, `$65C8`, whose addressing turned out to be
+`$2227 + Y*62 + aux*4` rather than a base pointer anyone could find on the
+stack. All twenty of its call sites are mapped. `$8F3E` is the trap in
+that table: it has no `RTS` after its first pass and falls through into a
+second, so reading it as two peer routines -- which is exactly what it
+looks like -- makes one pillar's halves travel at 2:1 and shear apart.
 
-## The patches are in `dist/`
+**The odometer.** Behind the walkers sits a five-segment travel budget,
+`$18B3`-`$18BC` with a phase index in `$18BD`, driven by **eight
+dispatchers in four machines** that all agree what a phase means. Halls
+are 365 to 395 units wide and you start 115 to 145 in. Phases 0 and 4 are
+the ends, where the background is pinned and the *player* crosses the
+screen instead. Nothing had described this, and knockback that ignores it
+desynchronises the scenery from the game's idea of where the scenery is --
+permanently, for that hall.
 
-Fifty BPS patches and one `.abp` bundle, and they are there because both
-formats exist to travel without the game. Apply one to your own dump:
+**The stages are a ring.** Six stage words, each setting the next, and
+stage 6 sets 0. There is no stage 7 and `$18AA` is never compared against
+7 anywhere in the ROM, which is why the princess could not be found by
+looking for one.
+
+**The ending exists; one rule is missing.** An early conclusion here was
+that the ending was never finished. That was wrong, and the correction is
+kept in the docs because the reasoning was reasonable and the conclusion
+was not. `w_A158` dresses both figures, stands them five pixels apart and
+runs a colour celebration -- rendered and zoomed, the overlap is an
+embrace. What is genuinely absent is the stance check: walk in still in
+fighting stance and this port greets you exactly like walking in unarmed.
+Fix 41 puts it back.
+
+**Death, and why walking stance is lethal.** `$18BF` is the player's
+health and `$18C2` the opponent's. Between them at `$6932` sits a stance
+test: struck while walking, health is forced to 1 and decremented -- an
+instant kill. That rule is what the restored princess kick reuses, so the
+strike is the game's own rather than an invention.
+
+**The audio, in full, and nothing dormant in it.** The driver is four
+routines; a note is four bytes and the gate byte is a duration in NMI
+ticks. `$64AE` holds exactly twelve descriptor pointers and **all twelve
+play**: a title theme, a sting when a fight starts, a sting when a stage
+ends, two cues over the one cutscene (the warlord, then the princess), and
+two one-tick noise blips that are the only sounds combat makes. Between
+the opening and closing stings the channels carry nothing else, which is
+what "no sound while walking" actually is. Identified by screenshotting
+the frame each cue starts on, not by guessing from length.
+
+**The NMI handler is not sound.** It is a five-phase background-colour
+gradient writing `$20`. An earlier note here called it audio; it is
+corrected in place, and the correction matters because it means the
+wait-skipping fixes could never have desynchronised the music -- the music
+was never on the loop's clock.
+
+**Every patched build was broken on real hardware.** An NTSC 7800 hashes
+the cartridge and checks a signature at `$FF80`-`$FFF7`. Karateka's
+`$FFF9` is `$47`, so the hashed range is the whole 48K and every byte any
+fix writes is inside it. A stale signature is not refused -- the console
+starts in **2600 mode**, which looks like a black screen and not like an
+error. PAL consoles do not check and no emulator does, so forty builds
+worked everywhere they were tested and nowhere they were played.
+[tools/sign7800.py](tools/sign7800.py) fixes that; the scheme is Rabin
+with public exponent 2, so signing is a square root of the hash and
+verifying is one squaring.
+
+## The patches
+
+41 live fixes over 14 knobs, plus 7 kept and marked withdrawn because
+being wrong in a recorded way is worth more than tidiness.
+
+**Start with `karateka-45-tweak`.** Reactions every ~5 frames against
+animation every ~10, knockback of 8 units over 3 hits that spends the
+hall's own travel budget, remapped controls, held strikes at 3-1-1, a
+difficulty switch that works *and* the right way round, and the princess
+kick. `-46-` and `-47-` are the same with a longer walking step.
 
 ```
 python tools/bps.py apply karateka.bin dist/karateka-45-tweak.bps out.bin
 ```
 
-`karateka-45-tweak` is the one to start with -- faster reactions, knockback
-that spends the hall's own travel budget, remapped controls, a working
-difficulty switch, and the stance check the port left out of its ending.
-`-46-` and `-47-` are the same with a longer walking step.
-
-The bundle is the pick-and-mix version, which refuses a selection that
-cannot mean one thing rather than resolving it by file order:
+Or pick your own combination from the bundle, which refuses a selection
+that cannot mean one thing rather than resolving it by file order:
 
 ```
 python tools/patchset.py list dist/karateka.abp
-python tools/patchset.py apply dist/karateka.abp --rom karateka.bin        --with knockback-light,remap --out out.bin
+python tools/patchset.py apply dist/karateka.abp --rom karateka.bin \
+       --with knockback-light,remap --out out.bin
 ```
 
-Either way the result comes out with a valid NTSC cartridge signature, so
-it boots on real hardware and not just in an emulator -- see
-`tools/sign7800.py` for why that is not automatic.
+Either way the result comes out with a valid NTSC signature, so it boots
+on real hardware and not only in an emulator.
 
-**None of these carries a byte of the game**, and that is checked rather
-than asserted: `selftest.py` decodes every published patch and compares
-each stored literal against the original at the same address, requiring
-zero matches, and confirms the bundle's sections describe their pre-image
-with a CRC32 instead of quoting it. A BPS emits a literal only for a run
-that differs, so every stored byte is authored; across `dist/` that is
-17,462 literals and no match. The check has a negative control: plant one
-cartridge byte in a patch and re-seal it, and it fires.
+To build them yourself from your own dump:
 
-## Start here
+```
+export KARATEKA_ROM="/path/to/Karateka (NTSC) (Atari) (1987) (FEC21472).a78"
+python patches/karateka.py --build      # every fix
+python patches/karateka.py --check      # no two disagree unless same knob
+python tools/selftest.py                # the toolkit against itself
+```
+
+`--check` sorts every pair of fixes into independent, alternatives,
+dependency or CONFLICT. It exists because fix 9 was withdrawn for looking
+independent and not being -- and it cannot catch a *semantic* clash, which
+is stated where it is easy to find rather than discovered later.
+
+## No ROM ships with this
+
+Not one cartridge byte is in this repository, and that is enforced rather
+than promised. `.gitignore` refuses every whole-ROM extension.
+`portkit.py` refuses a recipe carrying embedded data. Decoded artwork
+counts as cartridge bytes too, so the rendered sprite sheets and
+screenshots are left out; every one regenerates from your own dump.
+
+The patches in `dist/` are the exception and are safe by construction,
+which was audited rather than assumed: a BPS stores a literal only for a
+run that *differs* from the source, so across `dist/` that is **17,462
+literal bytes and not one equal to the original** at the same address. The
+`.abp` is stronger -- its sections describe their pre-image with a CRC32
+instead of quoting it, and its float blobs appear nowhere in the
+cartridge. `selftest.py` checks all of that on every run, and the check
+has a negative control: plant one cartridge byte in a patch, re-seal its
+checksum, and it fires.
+
+Supply your own copy of the NTSC release, crc32 `FEC21472`. The tools look
+for it beside the toolkit and a few levels down from the parent directory,
+so a normal library layout usually needs no configuration.
+
+## The toolkit
+
+Nothing in `tools/` is Karateka-specific. The cartridge model was tested
+against **2,664 retail and homebrew images** and lays out all but four,
+including Activision's 8K-granular mapper and bankset cartridges; the
+disassembler reproduces a hand-verified 128K disassembly byte for byte
+while also handling unbanked 4K-48K ROMs.
 
 ```
 python tools/workbench.py game.a78             # open everything at once
-```
-
-That is the one command worth remembering: it reads the header, scans for
-artwork and music, and each result has a button that opens it in the right
-editor. Everything below is the same work done a piece at a time.
-
-```
 python tools/survey.py game.a78 --strings      # what am I even looking at
 python tools/disasm.py game.a78 -c annotations.json -o src
 python tools/verify.py game.a78 -d src         # must pass, from day one
 ```
 
-To hear a cartridge's music instead of reading its code:
-
-```
-python tools/capture.py game.a78 --render      # .a78 -> .log -> .trk -> .wav
-```
-
-It works out TIA or POKEY from the header, picks the right machine for the
-region, records in MAME and renders. To edit what comes out:
-
-```
-python tools/trackeredit.py game.trk           a grid you can type notes into
-```
-
-`audio.md` breaks the capture into its four steps for when one comes out wrong;
-on Windows both jobs are a drag onto `Render dropped file.bat` or
-`Open in tracker.bat`.
-
-Then read [`docs/method.md`](docs/method.md) — the working order — and
-[`docs/pitfalls.md`](docs/pitfalls.md), which is a list of things that produced
-confidently wrong answers in real work. The garbage-collection trap in the
-emulator section is worth reading before you write any probe.
-
-## What's here
-
 ### Tools
 
-| | |
+| tool | what it is for |
 |---|---|
 | `workbench.py` | One place to open a cartridge: what the header says, what a scan finds, and a button on each result that launches the right editor with the space, base and format already filled in. A launcher, not another tool. |
 | `cart.py` | The `.a78` header and the mappers. Header flags checked against the image library, not against published bit lists — they disagree, and the cartridges win. |
@@ -179,16 +251,20 @@ announce itself.
 
 | | |
 |---|---|
-| [`method.md`](docs/method.md) | The order of work, and why byte-identity is the discipline everything rests on. |
-| [`pitfalls.md`](docs/pitfalls.md) | Traps that each produced a wrong answer in real work. |
-| [`hardware.md`](docs/hardware.md) | Memory map, MARIA, display lists, TIA, RIOT, PAL vs NTSC. |
-| [`cartridges.md`](docs/cartridges.md) | Header format, mapper flags with the evidence for each, mapper layouts. |
-| [`graphics.md`](docs/graphics.md) | Line-planar layout, pixel formats, character mode, finding artwork. |
-| [`emulation.md`](docs/emulation.md) | MAME as an instrument, and how to avoid measuring nothing. |
-| [`audio.md`](docs/audio.md) | The TIA's two voices, POKEY's four, why one chip is out of tune and the other is not, the tracker, and pulling songs out of a ROM and pushing them back. |
-
-`a7800.py` and `m6502.py` are libraries, not commands: the machine's constants
-and the 6502 opcode and cycle tables. Everything else runs from the shell.
+| [karateka-map.md](docs/karateka-map.md) | what the machine is |
+| [fixing-karateka.md](docs/fixing-karateka.md) | how each fix got its shape |
+| [karateka.md](docs/karateka.md) | the first pass, and the loop measurements |
+| [karateka-a8.md](docs/karateka-a8.md) | the Atari 8-bit version, for comparison |
+| [karateka-from-siblings.md](docs/karateka-from-siblings.md) | what other ports of the same engine reveal |
+| [porting-karateka.md](docs/porting-karateka.md) | what porting the 8-bit version would take |
+| [hardware.md](docs/hardware.md) | MARIA, TIA, POKEY, the BIOS |
+| [cartridges.md](docs/cartridges.md) | headers, mappers, the 2,664-image survey |
+| [graphics.md](docs/graphics.md) | display lists, sprites, palettes |
+| [audio.md](docs/audio.md) | finding and reading a music player |
+| [emulation.md](docs/emulation.md) | driving MAME, probes, recordings |
+| [patchset-format.md](docs/patchset-format.md) | the `.abp` format |
+| [method.md](docs/method.md) | how to take a cartridge apart |
+| [pitfalls.md](docs/pitfalls.md) | the mistakes, so they are made once |
 
 ### Templates
 
@@ -220,42 +296,11 @@ Watch the coverage figure too, and treat a bank stuck low as an open question.
 Python 3, no dependencies. MAME with 7800 BIOS images for the probes (`a7800`
 for NTSC, `a7800p` for PAL).
 
-## Status
+## Related
 
-The mapper layer, disassembler, assembler, round-trip verifier and display-list
-decoder are exercised against real images and the results are reproducible.
+- [Anchored-Bundle-of-Patches](https://github.com/Miasmark/Anchored-Bundle-of-Patches)
+  -- the `.abp` format on its own, with the console-specific parts removed.
+  Same `patchset/2` format; bundles written by either work in the other.
 
-Verified against running hardware (MAME): the SuperGame layout at 128K and at
-512K including the width of its bank switch, and the Absolute mapper on F-18
-Hornet. The TIA sound model matches a renderer validated by ear on a real game,
-sample for sample across all sixteen waveforms, and captures from running
-cartridges — TIA and POKEY alike — replay to the exact register state on every
-logged frame. The POKEY model covers four channels, all eight distortions, the
-clock selects, both 16-bit pairs, both high-pass filters, both polynomial
-lengths and volume-only mode — all of it measured against MAME with
-purpose-built single-tone cartridges rather than taken from a datasheet. The
-16-bit dividers agree to 0.00 cents across all four pairing paths, the filters
-reproduce its spectrum peak for peak, and all eight distortion modes reproduce
-its output bit for bit across three different divider and clock settings each.
-The polynomial voices took three attempts to get right: the first two were
-checked at a single setting, which cannot tell a correct model from a decimated
-one. `docs/audio.md` records how that went wrong, because noise generated the
-wrong way sounds exactly like noise generated the right way.
-
-Measured against **MAME v0.287 and `a7800` v5.2** — the 7800-devtools fork,
-which corrects POKEY's poly9 sequence and init state. Both agree with the model
-at 1.0000 on every case. Capture runs on MAME (the fork's Lua predates
-`install_write_tap`); accuracy is checked on the fork. `docs/emulation.md` has
-the split. The display-list decoder was
-checked against a live list pulled out of a running game, not only against its
-own self-test.
-
-Activision banking, Bankset and SOUPER are recognised and refused with an
-explanation rather than laid out wrongly.
-
-## Examples
-
-`examples/exo-annotations.json` — a real annotation file worked out with these
-tools, for a 512K homebrew whose inter-bank calls go through a trampoline that
-`RTS`es into the destination. It shows what the format looks like when the
-tracer needs help, and why.
+MIT licensed -- see [LICENSE](LICENSE), and [NOTICE](NOTICE) for what that
+does and does not cover.
