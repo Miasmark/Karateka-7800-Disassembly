@@ -9,7 +9,8 @@ disassembler reproduces the hand-verified 128K disassembly byte for byte while
 also handling unbanked 4K-48K ROMs.
 
 MIT licensed, which covers the code and the notes. It cannot grant rights
-over the games the tools analyse, and it does not need to: see below.
+over the games the tools analyse, and it does not need to -- see `NOTICE`
+and the section below.
 
 ## No ROM ships with this
 

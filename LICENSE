@@ -19,17 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-This licence covers the code and written notes in this repository.
-
-It does not and cannot grant any rights over the games these tools analyse.
-No cartridge data is included here, in any form: not ROM images, not patches
-carrying original bytes, and not artwork or music decoded out of one. Supply
-your own dumps.
-
-tools/sign7800.py is a port of Bruce Tomlin sign7800.c (2004), itself a
-hand-decompilation of an Atari program; the algorithm and key material are
-his published work and are reproduced here under the same understanding they
-have circulated in the 7800 community for twenty years.
