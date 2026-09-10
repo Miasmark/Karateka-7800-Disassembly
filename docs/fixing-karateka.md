@@ -2132,12 +2132,33 @@ of frames** -- bank 0 holds the main loop, so it is resident whenever the
 game is running. The patched cartridge also boots and plays identically to
 stock through the title and intro.
 
-Two smaller notes. PAL cartridges are never signed, so nothing here signs
-one -- `patchset.py` now checks the `.a78` header's TV byte and skips it,
-which it did not before and which had quietly put a pointless signature on
-the first PAL build. And the bundle refuses an NTSC dump outright: the
-body sizes differ, 65536 against 49152, before any anchor is even
-consulted.
+Two smaller notes. The bundle refuses an NTSC dump outright -- the body
+sizes differ, 65536 against 49152, before any anchor is consulted. And PAL
+cartridges are never signed, so nothing here signs one.
+
+That second point took two goes to get right, and the second failure is
+the more interesting one. `patchset.py` was signing PAL cartridges, so it
+learned to read the `.a78` header's TV byte and skip them. But a
+**headerless** dump has no TV byte, and the region cannot be recovered
+from the bytes either: an unsigned NTSC homebrew and a PAL cartridge look
+identical from the inside, both being `$FF` where a signature would go. So
+a headerless PAL image went on being signed after the "fix".
+
+The answer is that the *bundle* knows. It was built for one cartridge and
+says so, in `target.region`, and that survives having the header stripped
+off the file it is handed. `_resign` asks the bundle first and the header
+second, and when neither can say, it signs and states that it assumed.
+Checked all four ways:
+
+```
+headerless PAL    signature: not needed, this is a PAL cartridge
+headerless NTSC   signature: valid for a real NTSC 7800
+headered   PAL    signature: not needed, this is a PAL cartridge
+headered   NTSC   signature: valid for a real NTSC 7800
+```
+
+with the headered and headerless PAL outputs byte-identical once the
+header is set aside.
 
 ## Ranked
 

@@ -779,7 +779,7 @@ def cmd_check(ps, rom):
 def cmd_apply(ps, rom, wanted, out):
     blob = io.open(rom, "rb").read()
     result = ps.apply(blob, wanted, report=lambda s: print(s))
-    result, note = _resign(result)
+    result, note = _resign(result, ps.m.get("target", {}).get("region"))
     io.open(out, "wb").write(result)
     print("")
     print("  wrote %s" % out)
@@ -789,7 +789,7 @@ def cmd_apply(ps, rom, wanted, out):
     return 0
 
 
-def _resign(image):
+def _resign(image, declared=None):
     """Give a freshly assembled image a cartridge signature.
 
     This is the one case a patch file cannot carry. An NTSC 7800 checks a
@@ -812,13 +812,26 @@ def _resign(image):
     head = image[:len(image) - len(body)]
     # PAL cartridges are never checked and carry no signature -- the block
     # is erased EPROM in the retail dumps -- so signing one writes 120
-    # bytes over filler and changes the CRC for nothing
-    if sign7800.region(image) == "pal":
+    # bytes over filler and changes the CRC for nothing.
+    #
+    # Where the region comes from matters. A headered .a78 declares it,
+    # but a headerless dump does not, and it cannot be recovered from the
+    # bytes: an unsigned NTSC homebrew and a PAL cartridge look identical
+    # from the inside. So the *bundle* is asked first -- it knows which
+    # cartridge it was built for even when the file handed to it has had
+    # its header stripped.
+    where = declared or sign7800.region(image)
+    if where == "pal":
         return image, "signature: not needed, this is a PAL cartridge"
     try:
-        return head + sign7800.signed(body),             "signature: valid for a real NTSC 7800"
+        out = head + sign7800.signed(body)
     except sign7800.SignError as e:
         return image, "signature: NOT SIGNED -- %s" % e
+    if where:
+        return out, "signature: valid for a real NTSC 7800"
+    return out, ("signature: valid for a real NTSC 7800 -- assumed, since a "
+                 "headerless image declares no region and this bundle does "
+                 "not either")
 
 
 def _andlist(names):

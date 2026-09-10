@@ -196,6 +196,10 @@ def main():
             "what": PAL_NAME, "body_size": len(pal),
             "body_sha256": hashlib.sha256(pal).hexdigest(),
             "headers": [0, K.HDR], "base": 0, "anchors": anchors,
+            # a headerless PAL dump carries no TV byte, and nothing in the
+            # bytes distinguishes it from an unsigned NTSC cartridge, so
+            # the bundle is where that fact has to live
+            "region": "pal",
         },
         "knobs": {},
         "sections": sections,

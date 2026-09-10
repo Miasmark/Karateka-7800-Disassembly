@@ -4408,6 +4408,8 @@ def build_bundle(out_path=None):
             "body_size": len(rom),
             "body_sha256": hashlib.sha256(rom).hexdigest(),
             "headers": [0, HDR],
+            # so a headerless dump still gets the right answer about signing
+            "region": "ntsc",
             "base": "0x4000",
             "anchors": anchors,
         },
