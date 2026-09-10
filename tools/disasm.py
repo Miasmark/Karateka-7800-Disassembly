@@ -264,8 +264,29 @@ class Analyzer:
 
                 addr = nxt
 
+    # LD{A,X,Y} #imm tracked per register; ST{A,X,Y} reads back whichever
+    # register's tracked value is current. A handler doesn't have to use the
+    # same register for both bytes of a vector -- e.g. `LDA #lo / LDY #hi /
+    # STA vec_lo / STY vec_hi` is a common shape when A is freed up for
+    # something else in between the two stores (found in Centipede: a second
+    # NMI-vector target used exactly this shape and was invisible to an
+    # A-only version of this scan even with the right `ram_vectors` entry --
+    # see docs/pitfalls.md). Each register's tracked value is cleared by
+    # anything that loads it other than an immediate -- mirroring, not
+    # expanding, how conservative the original A-only version was: this does
+    # not attempt to track values through arithmetic (ADC/INX/...), so it can
+    # still miss a vector built that way, on the same terms the original
+    # implementation already accepted for A.
+    _VEC_LOADERS = {"A": "LDA", "X": "LDX", "Y": "LDY"}
+    _VEC_STORERS = {"A": "STA", "X": "STX", "Y": "STY"}
+    _VEC_CLOBBERS = {
+        "A": ("LDA", "PLA", "TXA", "TYA"),
+        "X": ("LDX", "TAX", "TSX"),
+        "Y": ("LDY", "TAY"),
+    }
+
     def scan_ram_vectors(self, lo_addr, hi_addr, window=24):
-        """Find `LDA #lo / STA nmi_vec_lo` + `LDA #hi / STA nmi_vec_hi` pairs.
+        """Find immediate-load + store pairs that write a 16-bit vector.
 
         MARIA's NMI goes through `JMP (nmi_vec)`, and each DLI installs the
         handler for the next zone, so the whole DLI chain is only reachable by
@@ -276,18 +297,30 @@ class Analyzer:
         for space in spaces:
             addrs = sorted(a for (s, a) in self.code if s == space)
             los, his = [], []
-            last_imm = None
+            last_imm = {"A": None, "X": None, "Y": None}
             for a in addrs:
                 mn, mode, operand, length = self.insn[(space, a)]
-                if mn == "LDA" and mode == "imm":
-                    last_imm = operand
-                elif mn == "STA" and mode in ("abs", "zp"):
-                    if operand == lo_addr and last_imm is not None:
-                        los.append((a, last_imm))
-                    elif operand == hi_addr and last_imm is not None:
-                        his.append((a, last_imm))
-                elif mn in ("LDA", "PLA", "TXA", "TYA"):
-                    last_imm = None
+                loaded = False
+                for reg, ld in self._VEC_LOADERS.items():
+                    if mn == ld and mode == "imm":
+                        last_imm[reg] = operand
+                        loaded = True
+                if loaded:
+                    continue
+                stored = False
+                for reg, st in self._VEC_STORERS.items():
+                    if mn == st and mode in ("abs", "zp"):
+                        v = last_imm[reg]
+                        if operand == lo_addr and v is not None:
+                            los.append((a, v))
+                        elif operand == hi_addr and v is not None:
+                            his.append((a, v))
+                        stored = True
+                if stored:
+                    continue
+                for reg, clobbers in self._VEC_CLOBBERS.items():
+                    if mn in clobbers:
+                        last_imm[reg] = None
             for la, lv in los:
                 for ha, hv in his:
                     if abs(ha - la) <= window:
@@ -680,6 +713,28 @@ def main():
                     help="override the mapper the header declares")
     ap.add_argument("--cycles", action="store_true",
                     help="note each instruction's cycle count")
+    ap.add_argument("--check-gaps", action="store_true",
+                    help="for every apparent JSR/JMP into a gap, say whether "
+                         "it is a real instruction the tracer reached (so the "
+                         "gap holds missed code) or just the opcode byte "
+                         "occurring inside data. Implies --gaps.")
+    ap.add_argument("--gaps", action="store_true",
+                    help="report byte ranges reached as neither code nor a "
+                         "declared data block -- the true unexplained set, "
+                         "as opposed to just 'not code' (which includes "
+                         "every table, tile sheet and audio stream you've "
+                         "already annotated). Cheap to run repeatedly as "
+                         "annotations.json grows; ranges are sorted largest "
+                         "first so the next annotation to write is obvious.")
+    ap.add_argument("--map", action="store_true",
+                    help="write a coverage-<space>.png heatmap per bank into "
+                         "the outdir: one pixel per byte, green for code, "
+                         "blue for a declared data block, red for neither. "
+                         "The same picture --gaps gives you as text, meant "
+                         "for a glance rather than a read. Needs Pillow "
+                         "(pip install pillow); every other feature of this "
+                         "tool has no dependencies, so this import only "
+                         "happens if you ask for --map.")
     args = ap.parse_args()
 
     try:
@@ -787,6 +842,241 @@ def main():
     for a_, refs in sorted(an.ramrefs.items(), key=lambda kv: -len(kv[1]))[:40]:
         nm = cfg.ram.get(a_) or a7800.HW.get(a_) or ""
         print("  $%04X  %3d refs  %s" % (a_, len(refs), nm))
+
+    if args.check_gaps:
+        args.gaps = True
+
+    if args.gaps or args.map:
+        status = coverage_status(an, cart, spaces)
+
+    if args.gaps:
+        print("\ngaps (neither code nor a declared data block):")
+        total_gap = 0
+        for space in spaces:
+            base = cart.base_of(space)
+            gap = sorted(a for a, s in status[space].items() if s == 0)
+            if not gap:
+                continue
+            total_gap += len(gap)
+            ranges = []
+            start = prev = gap[0]
+            for a_ in gap[1:]:
+                if a_ != prev + 1:
+                    ranges.append((start, prev))
+                    start = a_
+                prev = a_
+            ranges.append((start, prev))
+            ranges.sort(key=lambda r: r[0] - r[1])
+            print("  %s: %d bytes in %d range%s" %
+                  (space, len(gap), len(ranges), "" if len(ranges) == 1 else "s"))
+            for lo, hi in ranges:
+                print("    $%04X-$%04X  (%d bytes)" % (lo, hi, hi - lo + 1))
+        if total_gap == 0:
+            print("  none -- every byte is either code or a declared block")
+
+    if args.check_gaps:
+        check_gaps(an, cart, spaces, status)
+
+    if args.map:
+        try:
+            from PIL import Image
+        except ImportError:
+            sys.stderr.write(
+                "--map needs Pillow: pip install pillow\n"
+                "(every other feature of this tool has no dependencies -- "
+                "this is the one opt-in exception)\n")
+            return 2
+        print("\ncoverage maps (green=code, blue=data block, red=gap):")
+        COLORS = {0: (200, 60, 60), 1: (70, 150, 90), 2: (70, 100, 200)}
+        for space in spaces:
+            size = cart.size_of(space)
+            cols = 256 if size >= 32768 else 128 if size >= 8192 else 64
+            rows = (size + cols - 1) // cols
+            base = cart.base_of(space)
+            img = Image.new("RGB", (cols, rows), COLORS[0])
+            px = img.load()
+            s = status[space]
+            for i in range(size):
+                st = s.get(base + i, 0)
+                if st == 0:
+                    continue
+                px[i % cols, i // cols] = COLORS[st]
+            scale = 4 if cols <= 128 else 3
+            img = img.resize((cols * scale, rows * scale), Image.NEAREST)
+            path = os.path.join(args.outdir, "coverage-%s.png" % space)
+            img.save(path)
+            print("  %s -> %s" % (space, path))
+
+
+def check_gaps(an, cart, spaces, status):
+    """Are the gaps really free of missed code?
+
+    A gap is a byte range reached as neither code nor a declared block, so
+    the worry is that it holds a routine the trace never entered. The
+    obvious check -- scan the ROM for a JSR/JMP whose operand lands in a gap
+    -- is misleading on its own, and reliably so: the $20/$4C/$6C byte
+    values occur constantly inside data and in the middle of longer
+    instructions, and in practice those coincidences are ALL you find. In
+    two 16K titles checked with this, every apparent direct branch into a
+    gap was a coincidence.
+
+    Two things make the raw scan trustworthy:
+
+    1. The tracer already knows every address that is the first byte of an
+       instruction. A candidate whose opcode byte is not one of those is not
+       an instruction at all, and can be dismissed.
+
+    2. A direct JSR/JMP that the tracer DID reach was also followed, so its
+       target is code by construction and cannot still be a gap. A real hit
+       there means the annotations changed under the trace -- worth saying
+       out loud, not worth expecting.
+
+    The case that genuinely escapes the tracer is `JMP ($xxxx)`, which it
+    cannot follow. For those the operand is the POINTER, not the target, so
+    the pointer is dereferenced here; when it lives in RAM the target is not
+    knowable statically at all, and those sites are listed separately
+    because they are exactly what an annotations `ram_vectors` entry exists
+    to resolve.
+    """
+    real, bogus, ramind = [], [], []
+    for space in spaces:
+        base, size = cart.base_of(space), cart.size_of(space)
+        st = status[space]
+        in_rom = lambda x: base <= x < base + size
+        for a in range(base, base + size - 2):
+            op = cart.byte(space, a)
+            if op not in (0x20, 0x4C, 0x6C):
+                continue
+            operand = cart.byte(space, a + 1) | (cart.byte(space, a + 2) << 8)
+            traced = (space, a) in an.code
+            if op == 0x6C:
+                if not in_rom(operand):
+                    if traced:
+                        ramind.append((space, a, operand))
+                    continue
+                if not in_rom(operand + 1):
+                    continue
+                target = (cart.byte(space, operand)
+                          | (cart.byte(space, operand + 1) << 8))
+                name = "JMP ($%04X) ->" % operand
+            else:
+                target = operand
+                name = "JSR" if op == 0x20 else "JMP"
+            if not in_rom(target) or st.get(target) != 0:
+                continue
+            (real if traced else bogus).append((space, a, target, name))
+
+    print("\ngap entry points (apparent JSR/JMP into a gap):")
+    if not (real or bogus or ramind):
+        print("  none -- no byte pattern anywhere in the ROM even looks like "
+              "a call into a gap")
+        return 0
+    if bogus:
+        print("  %d coincidence%s -- the $20/$4C/$6C byte is not an instruction "
+              "start, so it is data or a mid-instruction byte, not a call:"
+              % (len(bogus), "" if len(bogus) == 1 else "s"))
+        for space, a, t, nm in bogus[:12]:
+            print("    %s:%04X  %-16s $%04X   (not traced as code)"
+                  % (space, a, nm, t))
+        if len(bogus) > 12:
+            print("    ... and %d more" % (len(bogus) - 12))
+    if real:
+        print("  %d REAL call site%s -- a traced instruction branching into a "
+              "gap. The gap holds code, or the annotations changed under the "
+              "trace; either way investigate:"
+              % (len(real), "" if len(real) == 1 else "s"))
+        for space, a, t, nm in real:
+            print("    %s:%04X  %-16s $%04X   <-- MISSED CODE" % (space, a, nm, t))
+    elif bogus:
+        print("  no real call site among them: every apparent branch into a "
+              "gap is a byte coincidence, so no traced code enters any gap.")
+    if ramind:
+        print("  %d traced JMP ($xxxx) through a RAM pointer -- the target is "
+              "not knowable statically, so no gap claim covers these. If a "
+              "gap is suspected to be a handler, this is how it gets reached; "
+              "resolve with a 'ram_vectors' entry or a live probe:"
+              % len(ramind))
+        for space, a, ptr in ramind[:8]:
+            nm = an.ram.get(ptr) if hasattr(an, "ram") else None
+            print("    %s:%04X  JMP ($%04X)%s" % (space, a, ptr,
+                                                 "  " + nm if nm else ""))
+        if len(ramind) > 8:
+            print("    ... and %d more" % (len(ramind) - 8))
+
+    # The case above cannot see code that has no reachable caller at all, and
+    # the "coincidence" verdict is circular for it: nothing inside a wholly
+    # unreached region is an instruction start, so every reference into one
+    # gets dismissed no matter how real it is.
+    #
+    # One shape of that is worth testing directly, because a tracer can never
+    # find it and it is unambiguous when present: a gap that a traced JMP
+    # steps straight over. Falling into the bytes after a JMP is impossible,
+    # so if a routine is reached at all it is reached from somewhere else --
+    # and the tracer, arriving only via the JMP, never enters. In Pole
+    # Position II this hid three routines and 929 bytes, the whole of the
+    # car's physics, behind nine bytes that were three JSRs.
+    skipped = []
+    for space in spaces:
+        base = cart.base_of(space)
+        st = status[space]
+        gap = sorted(a for a, s in st.items() if s == 0)
+        if not gap:
+            continue
+        starts = [gap[0]] + [b for a_, b in zip(gap, gap[1:]) if b != a_ + 1]
+        ends = dict()
+        run_start = gap[0]
+        for a_, b in zip(gap, gap[1:]):
+            if b != a_ + 1:
+                ends[run_start] = a_
+                run_start = b
+        ends[run_start] = gap[-1]
+        for g in starts:
+            j = g - 3
+            if j < base or (space, j) not in an.code:
+                continue
+            if cart.byte(space, j) != 0x4C:
+                continue
+            tgt = cart.byte(space, j + 1) | (cart.byte(space, j + 2) << 8)
+            if tgt > g:
+                skipped.append((space, g, ends[g], j, tgt))
+    if skipped:
+        print("  %d gap%s stepped over by a traced JMP -- unreachable by "
+              "fall-through, so the tracer cannot enter even if the bytes are "
+              "live code with a caller elsewhere. Decode by hand and add an "
+              "entry if they are instructions:"
+              % (len(skipped), "" if len(skipped) == 1 else "s"))
+        for space, g, e, j, tgt in skipped:
+            print("    %s:%04X-%04X (%d bytes)  skipped by %s:%04X JMP $%04X"
+                  % (space, g, e, e - g + 1, space, j, tgt))
+    return len(real) + len(skipped)
+
+
+def coverage_status(an, cart, spaces):
+    """{space: {addr: 0|1|2}} -- 0 gap, 1 code, 2 declared data block.
+
+    Shared by --gaps and --map so both agree on exactly what counts as
+    covered: an instruction's full byte range (an.code, length from
+    an.insn), plus every address any 'blocks' entry in annotations.json
+    claims (an.forced_data). Anything else in the space's own address
+    range is a gap -- reached as neither.
+    """
+    result = {}
+    for space in spaces:
+        base = cart.base_of(space)
+        size = cart.size_of(space)
+        s = {a: 0 for a in range(base, base + size)}
+        for (sp, a) in an.code:
+            if sp != space:
+                continue
+            length = an.insn[(sp, a)][3]
+            for i in range(length):
+                if a + i in s:
+                    s[a + i] = 1
+        for (sp, a) in an.forced_data:
+            if sp == space and a in s and s[a] == 0:
+                s[a] = 2
+        result[space] = s
+    return result
 
 
 if __name__ == "__main__":

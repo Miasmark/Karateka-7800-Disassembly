@@ -74,6 +74,18 @@ and MARIA forms each character's graphics address as:
 Character sets are therefore line-planar too: page `CHARBASE+0` is line 0 of all
 256 characters, `CHARBASE+1` is line 1, and so on.
 
+That is how the set must be laid out *at the address CHARBASE names* -- it is
+not necessarily how the cartridge stores it. A ROM is free to keep its font
+**linearly**, each glyph's scanlines in consecutive bytes, and de-interleave
+into the line-planar form while copying the set into RAM at init. One shipped
+game does exactly that, storing 4x5-pixel glyphs six bytes apart (five
+scanlines plus a pad byte) and interleaving two pointers a fixed distance apart
+as it copies. Rendered with the line-planar reader, such a font is noise at
+every base and every `--lines` value, because the grid slices across glyph
+cells instead of along them. `gfx.py --linear CELL` reads the linear form; if a
+charset render is unrecoverable noise everywhere, try it before concluding the
+region isn't graphics.
+
 This is why game text is so often not ASCII. The character number is an index
 into whatever order the artist drew the alphabet in, and a game that only needs
 capitals, digits and a few punctuation marks will pack them however it likes.
@@ -84,13 +96,30 @@ beats any amount of frequency analysis on the text bytes.
 
 ## Finding graphics in an unknown ROM
 
-1. `survey.py` flags banks whose entropy runs above about 7 bits/byte. Bitmap
+1. **If the game runs, walk the live display list first.** `dlwalk.py` reports
+   what MARIA is actually being pointed at, with the width and line count
+   already decoded -- which beats inferring them, and is sometimes the only
+   thing that works at all. In one 16K title the 4K sprite block had **zero**
+   absolute references anywhere in the ROM: no `LDA #$Cx / STA ptr` pointer
+   setup, no pointer table, nothing a static search could find, because the
+   display list is built in RAM and the addresses only ever exist there. Every
+   static search for it was guaranteed to fail before it was run.
+2. `survey.py` flags banks whose entropy runs above about 7 bits/byte. Bitmap
    graphics use the full byte range fairly evenly; code does not.
-2. Render candidate pages with `gfx.py` and look. Human pattern recognition is
+3. Render candidate pages with `gfx.py` and look. Human pattern recognition is
    the best tool available here and it is not close.
-3. Once you find one object, its neighbours are usually adjacent -- artwork is
+4. Once you find one object, its neighbours are usually adjacent -- artwork is
    laid out in blocks, and finding the block boundaries tells you the frame
-   count of an animation.
+   count of an animation. For a direct-mode sheet the frames are usually packed
+   at a stride equal to the object's own width, so `gfx.py --direct W --sheet N`
+   lays the whole set out at once. Do that before trying to read any single
+   frame: a wrong `W` shears the sheet diagonally, which is unmistakable across
+   thirty frames and invisible in one, and the bank boundaries and the frame
+   count both fall out of the same picture.
+
+The ordering matters. Steps 2 and 3 are a search of the cartridge; step 1 is a
+question put to the running machine, and it answers directly what the others
+only narrow down.
 
 ## Palettes
 
@@ -152,7 +181,12 @@ pointing at RAM:
 That is correct, and it is the whole shape of graphics on this machine: the
 display list is **built in RAM every frame**, so it does not exist until the
 game runs. A static trace has nowhere further to go. What it *can* find
-statically is CHARBASE, because a character set is a fixed page in ROM.
+statically is CHARBASE -- though note that CHARBASE names *an address*, not
+necessarily a ROM one. A game that copies its character set into RAM at init
+will have CHARBASE pointing into RAM, and a static read of it tells you where
+the set ends up rather than where it is stored. If CHARBASE resolves to RAM,
+the set is being relocated from somewhere in the cartridge and the copy routine
+is what leads back to the source.
 
 To get the rest, capture a live list and feed it back:
 
@@ -180,12 +214,29 @@ about an eighth of the time and confident every time.
 **A block cannot describe a sprite.** 7800 graphics are line-planar -- `W`
 bytes on each of `H` successive pages -- so a sprite is not a run of bytes and
 no `blocks` entry can span it. Only character sets and audio tables become
-blocks. Sprites go in the manifest with their width, where `gfx.py` can draw
-them properly:
+blocks. Sprites go in the manifest with their width, where `gfx.py --direct`
+can draw them properly:
 
 ```
-python tools/gfx.py game.a78 --space b3 --base 0xA000 --lines 128 -o art.png
+python tools/gfx.py game.a78 --space b3 --base 0x8020 --direct 24 --lines 8 -o obj.png
 ```
+
+Get `W` (`--direct`) and `H` (`--lines`) from the live display list
+(`dlwalk.py`), not a guess -- and don't reach for the indirect-mode default
+(no `--direct`) for a single object just because it's the tool's default
+shape. That default reads a 256-wide grid sharing the object's low byte, so
+pointing it at a narrow direct-mode object without `--direct` "succeeds" by
+drawing up to 255 unrelated neighbours around it -- whatever else happens to
+share that low byte at a different page, background fills and other tiles
+included -- and nothing in the output says so. A ROM with several
+narrow direct-mode tiles between two real character sets found exactly this
+the hard way: the ungated grid render showed what looked like genuine,
+unrelated artwork sitting two dozen pages deeper than the tiles' real
+few-scanline extent, and only reading exactly `W`×`H` showed what was
+actually there -- solid colour fills and diagonal tile edges, not a sprite.
+Indirect mode (no `--direct`, the default) is for an actual character set --
+a real 256-entry sheet like `$A000` above, where the grid *is* the right
+shape and `--lines` is genuinely a font's row height, not a sprite's.
 
 ## Changing it
 

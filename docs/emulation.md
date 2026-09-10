@@ -22,6 +22,18 @@ More generally: **treat every negative result from an emulator probe as
 unproven until you have shown the probe still works.** "I saw nothing" and "my
 instrument was switched off" look identical from the outside.
 
+**A third way to switch the instrument off without noticing: a callback that
+errors.** A tap function that indexes `cpu.state` with a register name that
+doesn't exist for the CPU core in use throws a Lua runtime error -- and that
+error is swallowed the same way a GC'd tap or a written-once-then-abandoned
+address is: the script keeps running, prints its normal progress lines, and
+just never adds an event. On the m6502 core the stack pointer is
+`cpu.state["SP"]`, not `cpu.state["S"]` -- a plausible guess that produces
+exactly this failure, discovered only by writing a two-line probe that dumps
+`for k,v in pairs(cpu.state) do print(k) end` once at startup and reading the
+real key names back. Do that dump the first time any new probe touches a
+register beyond `PC`, before trusting a clean-looking run with zero results.
+
 ## Headless runs
 
 ```
@@ -64,6 +76,16 @@ is how you compare stock and patched behaviour on identical input. That only
 holds while your edits do not change timing or input handling -- a patch that
 shifts a frame count will desynchronise a recording, and the divergence is
 usually obvious (the player walks into a wall).
+
+**`-playback`/`-record` silently resolve through `input_directory`, not your
+given path.** MAME's `input_directory` setting (default `inp`, persisted in a
+generated `mame.ini` you may not know exists) gets prepended to whatever you
+pass `-playback`/`-record` -- including an absolute path, at least on the
+version this was checked against. A recording sitting right where you pointed
+still fails with `Input file ... not found` for no visible reason. Fix by
+passing `-input_directory .` (or wherever the file actually lives) explicitly;
+don't waste time re-checking the path itself once you've already confirmed the
+file exists on disk.
 
 ## Watching the right thing
 

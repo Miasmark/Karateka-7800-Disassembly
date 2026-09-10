@@ -13,6 +13,7 @@ Supported:
     label:
     .byte $XX,$XX,...
     .word sym,$XXXX,...
+    .res N[,$XX]          N filler bytes (default $FF)
     MNEM / MNEM operand   all documented addressing modes
     MNEM.w operand        force absolute where a zero-page form also exists
 
@@ -55,7 +56,35 @@ class Assembler:
         self.org = None
 
     def value(self, tok, pass2):
+        """A number, a symbol, or a small expression over them.
+
+        disasm.py emits neither expressions nor </> operators, so none of this
+        is needed to round-trip a listing -- it is here because source written
+        BY HAND needs `#<label`, `#>label` and `table+1` to be worth using at
+        all, and an assembler that cannot take the low byte of an address
+        cannot set a MARIA pointer.
+
+        Deliberately not a full expression parser: `+` and `-` applied left to
+        right, and a leading `<` or `>` for the low or high byte. No
+        precedence, because there is no operator here that needs it.
+        """
         tok = tok.strip()
+        if tok[:1] in ("<", ">"):
+            v = self.value(tok[1:], pass2)
+            if v is None:
+                return None
+            return (v & 0xFF) if tok[0] == "<" else ((v >> 8) & 0xFF)
+        parts = [t for t in re.split(r"([+-])", tok) if t.strip()]
+        if len(parts) > 1:
+            total = self.value(parts[0], pass2)
+            if total is None:
+                return None
+            for i in range(1, len(parts) - 1, 2):
+                rhs = self.value(parts[i + 1], pass2)
+                if rhs is None:
+                    return None
+                total = total + rhs if parts[i] == "+" else total - rhs
+            return total
         m = NUM.match(tok)
         if m:
             return int(m.group(1), 16) if m.group(1) else int(m.group(2))
@@ -109,7 +138,7 @@ class Assembler:
             line = strip_comment(raw)
             if not line.strip():
                 continue
-            m = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(\S+)\s*$", line)
+            m = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*$", line)
             if m:
                 self.sym[m.group(1)] = self.value(m.group(2), True)
                 continue
@@ -123,6 +152,25 @@ class Assembler:
                 if pc is None:
                     raise AsmError("line %d: label before .org" % ln)
                 self.sym[m.group(1)] = pc
+                continue
+            m = re.match(r"^\s*\.res\s+(.*)$", line, re.I)
+            if m:
+                # Reserve/fill. disasm.py never emits this -- it exists because
+                # MARIA's direct mode needs a sprite's scanlines on consecutive
+                # PAGES, so authored source has to step the pc across hundreds
+                # of bytes it does not care about. Without it that padding has
+                # to be written out as .byte lines, and a second .org is not an
+                # option: pass 2 requires contiguous output and reports drift.
+                parts = [t for t in m.group(1).split(",") if t.strip()]
+                if not parts or len(parts) > 2:
+                    raise AsmError("line %d: .res wants a count and an "
+                                   "optional fill byte" % ln)
+                n = self.value(parts[0], True)
+                fill = self.value(parts[1], True) if len(parts) == 2 else 0xFF
+                if n < 0:
+                    raise AsmError("line %d: .res count is negative" % ln)
+                layout.append((ln, pc, "res", fill, n))
+                pc += n
                 continue
             m = re.match(r"^\s*\.(byte|word)\s+(.*)$", line, re.I)
             if m:
@@ -147,7 +195,9 @@ class Assembler:
             if len(out) != at - self.org:
                 raise AsmError("line %d: pc drift (expected $%04X, at $%04X)"
                                % (ln, at, self.org + len(out)))
-            if kind == "data":
+            if kind == "res":
+                out += bytes([a & 0xFF]) * b
+            elif kind == "data":
                 for t in b:
                     v = self.value(t, True)
                     if a == "byte":

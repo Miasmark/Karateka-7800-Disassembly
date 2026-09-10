@@ -31,6 +31,18 @@ page indexed by X from a base of `$CF`. Almost every "routine" is a list
 of addresses. That single fact reorganised everything after it: a
 conventional disassembly of this ROM is mostly a disassembly of data.
 
+**A static tracer reaches 0.7% of it -- until you tell it where the
+primitives are.** `disasm.py` follows 6502 control flow from the reset
+vector and stops after boot, because the machine then stops executing 6502
+and starts executing a thread. But a primitive's code field points at its
+own code two bytes on, which makes all 200 of them findable in a dozen
+lines. Feed those in as entry points and coverage goes to **18.3%** -- 8977
+bytes, 4407 instructions -- and the gap check then reports that *no traced
+code enters any gap*: every apparent call into unexplained territory is a
+`$20` or `$4C` byte falling inside threaded data. The image really is
+entered only through the thread. `patches/karateka-entries.py` generates
+them.
+
 **The slowness is a scheduler.** `w_A59C` runs nine slots, one entity per
 round with a frame of padding each, so a decision costs 13 frames. Probed
 across real fights, **87.5% of those slots hold the do-nothing word** --
@@ -220,6 +232,9 @@ python tools/verify.py game.a78 -d src         # must pass, from day one
 | `bps.py` | BPS patches. Build them headerless. |
 | `sign7800.py` | Cartridge signatures. An NTSC 7800 hashes the cartridge and checks a signature over that hash at `$FF80`-`$FFF7`; a cartridge that fails is not refused, it is started in **2600 mode**, which looks like a black screen rather than an error. PAL consoles do not check and no emulator does, so a patched ROM works everywhere it gets tested and nowhere it gets played. Verifies, and signs -- the scheme is Rabin with public exponent 2, so a signature is a square root of the hash mod `n`, found by stepping the hash's one don't-care byte until a root exists. A port of Bruce Tomlin's `sign7800.c`, checked against stock dumps of two different games. Every build path here signs; the patch-set has to do it at apply time, since the signature covers the whole image and every combination of options has a different one. |
 | `mksite.py` | Packs generated pages into self-contained HTML. |
+| `dmabudget.py` | **What MARIA leaves you.** MARIA draws by DMA and halts the 6502 while it does, so the cycle budget is a function of what is on screen. Give it a screen and it reports what drawing costs and what is left for game logic. The constants are measured, not quoted -- a cartridge that counts loop iterations per frame, one build per display-list shape -- and the model was validated by predicting shapes it had never seen. |
+| `mksprite.py` | **Artwork in, not just out.** Turns a PNG into a direct-mode sprite laid out the way MARIA reads one -- bottom-first, a page per scanline -- with `--frames N` packing an animation side by side at the stride shipping sprite sheets use. Refuses an image with more colours than the mode has. |
+| `newgame.py` | **Starts a game.** Writes a project that assembles, boots and puts a moving sprite on screen: the two-level display list, the vblank-synced main loop, and a sprite stored the way MARIA actually reads one -- bottom-up, a page per scanline. Every other tool here reads a cartridge somebody else wrote; this one writes the smallest cartridge that is still a real one. The register values come from shipping 1987 code, and the source is commented to be edited. |
 
 ### On Windows
 

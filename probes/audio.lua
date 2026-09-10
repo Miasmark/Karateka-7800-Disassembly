@@ -101,8 +101,27 @@ else
   end
 end
 
-local fire = DRIVE and
-  MACHINE.ioport.ports[":buttons"].fields["P1 Button 1"] or nil
+-- Find the button port by case-insensitive tag. MAME reports this one as
+-- ":BUTTONS"; looking up ":buttons" returns nil, `fire` stays nil, and
+-- A7800_DRIVE does NOTHING while still reporting that it is driving. That is
+-- how every "driven" capture taken here for some time was actually a passive
+-- one, which is not a difference you can see in the log it produces.
+local buttons_port = nil
+if DRIVE then
+  for tag, port in pairs(MACHINE.ioport.ports) do
+    if tag:lower() == ":buttons" then buttons_port = port end
+  end
+end
+local fire = nil
+if buttons_port then
+  for name, field in pairs(buttons_port.fields) do
+    if name:lower():find("p1") and name:lower():find("button 1") then fire = field end
+  end
+end
+if DRIVE and not fire then
+  print("A7800_DRIVE was asked for but no P1 fire button was found; "
+        .. "this capture is PASSIVE. Do not compare it against a driven run.")
+end
 
 emu.register_frame_done(function()
   frame = frame + 1

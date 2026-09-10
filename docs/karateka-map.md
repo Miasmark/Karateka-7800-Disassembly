@@ -1077,9 +1077,35 @@ are probably the machinery of moving between sections of a stage.
 enough to find the height dispatch and the strike words; nobody has read what
 the animation actually does between those points.
 
-**203 addresses look like primitives and 121 are named by the threaded code.**
+**200 addresses look like primitives and 121 are named by the threaded code.**
 The rest are either unreached or reached through a path the decompiler does not
-follow, and no coverage pass has been done to say which.
+follow. The coverage pass has now been done, and it says more than expected.
+
+Hand those 200 to `disasm.py` as tracer entries -- `patches/karateka-entries.py`
+generates them, finding each one by its code field pointing at itself -- and
+coverage goes from **0.7% to 18.3%**: 323 bytes and 173 instructions become
+8977 bytes and 4407. That is the executable half of the image, and the
+remaining 40177 bytes are threaded data, which is what they should be.
+
+Then `--check-gaps` gives the result worth having: **no traced code enters any
+gap.** All 1021 apparent `JSR`/`JMP` targets in unexplained territory are byte
+coincidences -- a `$20`, `$4C` or `$6C` falling inside threaded data rather
+than starting an instruction. The claim that this image is entered only
+through the thread is now checked rather than assumed.
+
+Six small ranges are stepped over by a traced `JMP`, so the tracer cannot
+reach them by fall-through even if they are live code. They are the places
+worth decoding by hand:
+
+    $4004-$400D (10)   skipped by $4001 JMP $405F
+    $4040-$4041 (2)    skipped by $403D JMP $4042
+    $4054-$4055 (2)    skipped by $4051 JMP $4056
+    $4D1D-$4D1F (3)    skipped by $4D1A JMP $4D76
+    $5011-$501D (13)   skipped by $500E JMP $501E
+
+The first of those sits directly below `NEXT` at `$401E` and is the target of
+a run of `JMP`s at `$4097`-`$40C9`, which makes it a jump table into the
+interpreter's core rather than data.
 
 **Whether button 1 is actually required for commands 3/5, or merely always
 observed alongside them so far.** See "The six-copy movement state

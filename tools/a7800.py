@@ -38,9 +38,15 @@ for _base in (0x0100, 0x0200):
     for _a, _n in list(TIA.items()) + list(MARIA.items()):
         HW[_base + _a] = _n + "_m%d" % (_base >> 8)
 
-MARIA_CTRL_BITS = """CTRL: b7 ColorKill  b6-5 DMA(00=?,01=?,10=on,11=off)
-      b4 CharWidth(1=1byte)  b3 Border(0=bg,1=black)  b2 Kangaroo
-      b1-0 ReadMode(00=160x2/4, 10=320A/320D, 11=320B/320C)"""
+MARIA_CTRL_BITS = """CTRL: b7 ColorKill  b6-5 DMA(10=on, 11=off)
+      b4 CharWidth(0=1 byte/char, 1=2 bytes/char)  b3 Border(0=bg,1=black)
+      b2 Kangaroo  b1-0 ReadMode(00=160x2/4, 10=320A/320D, 11=320B/320C)"""
+# b4 was recorded here the other way round ("1=1byte") until it was measured:
+# setting it makes character mode cost one MORE fetch per character, not one
+# fewer. See docs/hardware.md, "What MARIA costs". Both shipping games in
+# this series agree -- they clear b4 and store one byte per character line.
+# b6-5: only 10 and 11 were ever observed in shipping code, so 00 and 01 are
+# left unlabelled rather than guessed.
 
 
 def region_of(addr):

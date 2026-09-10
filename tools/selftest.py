@@ -94,6 +94,289 @@ def t_dlwalk():
     return "5-byte display-list entry decoded correctly"
 
 
+def t_check_gaps():
+    """--check-gaps must find real missed code, not just say "all clear".
+
+    A checker that can only ever report "nothing found" is worthless, which
+    is the toolkit's own read-tap pitfall in a different costume. So this
+    builds a 16K image with exactly one hidden routine, reachable only
+    through `JMP ($C900)` -- an indirect the tracer cannot follow -- and
+    requires that the tool both flags it AND resolves the pointer to the
+    real target. It also plants a $20 byte inside data, which must be
+    dismissed as a coincidence rather than reported.
+    """
+    rom = bytearray([0xFF] * 16384)
+
+    def put(addr, bs):
+        rom[addr - 0xC000:addr - 0xC000 + len(bs)] = bytes(bs)
+
+    put(0xC000, [0x6C, 0x00, 0xC9])                    # traced: JMP ($C900)
+    put(0xC900, [0x00, 0xCF])                          # the pointer -> $CF00
+    put(0xCF00, [0xA9, 0x01, 0x8D, 0x00, 0x20, 0x60])  # the hidden routine
+    put(0xFFFA, [0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0])
+
+    tmpdir = tempfile.mkdtemp(prefix="selftest-gaps-")
+    rom_path = os.path.join(tmpdir, "synthetic.a78")
+    cfg_path = os.path.join(tmpdir, "annotations.json")
+    io.open(rom_path, "wb").write(bytes(rom))
+    json.dump({"entries": ["rom:C000"], "labels": {}, "ram": {},
+               "comments": {}, "blocks": []},
+              io.open(cfg_path, "w", encoding="utf-8"))
+
+    out = run_tool("disasm.py", rom_path, "-c", cfg_path,
+                   "-o", os.path.join(tmpdir, "src"), "--check-gaps")
+    if "MISSED CODE" not in out:
+        raise AssertionError("did not flag the hidden routine:\n" + out)
+    if "$CF00" not in out:
+        raise AssertionError("did not dereference the pointer to $CF00:\n" + out)
+    if "1 REAL call site" not in out:
+        raise AssertionError("expected exactly one real call site:\n" + out)
+    if "coincidence" not in out:
+        raise AssertionError("did not dismiss the planted $20 byte:\n" + out)
+    return "found code hidden behind an indirect jump; dismissed a decoy"
+
+
+def t_newgame():
+    """The scaffold must assemble to a real 16K cartridge, sprite included.
+
+    Checked here rather than by eye because the failure this guards against
+    is silent: store a direct-mode sprite as a flat bitmap and it still
+    assembles, still boots, and draws one row of your art repeated eight
+    times. So the test asserts the layout MARIA actually reads -- rows one
+    page apart, bottom row at the address the display list names, top row
+    at the highest page.
+    """
+    import newgame
+    tmpdir = tempfile.mkdtemp(prefix="selftest-newgame-")
+    out = run_tool("newgame.py", tmpdir, "--title", "Selftest", "--build",
+                   "--force")
+    a78 = os.path.join(tmpdir, "game.a78")
+    if not os.path.exists(a78):
+        raise AssertionError("no cartridge written:\n" + out)
+    blob = io.open(a78, "rb").read()
+    if len(blob) != 128 + 0x4000:
+        raise AssertionError("cartridge is %d bytes, not 128 + 16K" % len(blob))
+    rom = blob[128:]
+
+    rows = newgame.sprite_rows()
+    top, bottom = rows[0], rows[-1]
+    base = newgame.GFX_PAGE << 8
+    hi = base + (newgame.SPRITE_LINES - 1) * 0x100      # highest page
+    at = lambda addr, n: rom[addr - 0xC000:addr - 0xC000 + n]
+    if at(base, len(bottom)) != bottom:
+        raise AssertionError("bottom row is not at the DL's own address")
+    if at(hi, len(top)) != top:
+        raise AssertionError("top row is not at the highest page -- the "
+                             "sprite is stored the wrong way up")
+    if top == bottom:
+        raise AssertionError("test art is symmetric, so it cannot detect "
+                             "an inverted sprite")
+
+    reset = rom[0x3FFC - 0x0000] | (rom[0x3FFD] << 8)
+    if reset != 0xC000:
+        raise AssertionError("RESET vector is $%04X, not $C000" % reset)
+    return "assembles to 16K; sprite stored bottom-up, a page per scanline"
+
+
+def t_dmabudget():
+    """The cost model must still reproduce the measurements it was fitted to.
+
+    These seven numbers came off real MAME runs (see dmabudget.py for the
+    method). They are here because a plausible-looking edit to one constant
+    would otherwise go unnoticed -- the tool prints a confident table either
+    way.
+    """
+    import dmabudget as d
+    cases = [                       # 12 zones x 16 lines, 2 objects
+        (8, 0, 0, 4177), (1, 0, 0, 2242), (16, 0, 0, 6489),
+        (8, 0, 1, 4373),                       # 5-byte entries
+        (4, 1, 0, 4372), (8, 1, 0, 6685),      # character mode, 1 byte/char
+        (4, 2, 0, 5515),                       # character mode, 2 bytes/char
+    ]
+    # 24 zones x 8 lines, 2 objects: holey DMA and display interrupts
+    extra = [
+        (dict(lines=8, count=2, width=20), 24, 1412),
+        (dict(lines=8, count=2, width=20, holey=True), 24, 1825),
+        (dict(lines=8, count=2, width=8), 24, 1660),
+        (dict(lines=8, count=2, width=20, dli=True), 24, 1383),
+        (dict(lines=8, count=2, width=8, dli=True), 24, 1631),
+    ]
+    worst = 0.0
+    for kw, n, iters in extra:
+        measured = (1960 - iters) * 14.0156      # the counting cartridge
+        model = sum(d.Zone(**kw).cycles() for _ in range(n))
+        err = abs(model - measured) / measured
+        worst = max(worst, err)
+        if err > 0.03:
+            raise AssertionError("%s: model %.0f vs measured %.0f (%.1f%%)"
+                                 % (kw, model, measured, 100 * err))
+    if d.Zone(8, 2, 20, holey=True).cycles() >= d.Zone(8, 2, 20).cycles():
+        raise AssertionError("holey DMA must be cheaper, not dearer")
+    if d.DLI_COST <= 0:
+        raise AssertionError("a display interrupt is not free")
+    for width, chars, five, measured in cases:
+        zones = [d.Zone(16, 2, width, five=bool(five), chars=chars)
+                 for _ in range(12)]
+        model = sum(z.cycles() for z in zones)
+        err = abs(model - measured) / measured
+        worst = max(worst, err)
+        if err > 0.03:   # the model's honest worst case, at width 1
+            raise AssertionError(
+                "width %d chars %d five %d: model %.0f vs measured %d (%.1f%%)"
+                % (width, chars, five, model, measured, 100 * err))
+    if d.REGIONS["ntsc"][0] != 262:
+        raise AssertionError("NTSC scanline count changed")
+    return ("12 measured configurations reproduced, worst error %.1f%%"
+            % (100 * worst))
+
+
+def t_mksprite():
+    """Packing must invert, and must come out bottom-first.
+
+    The orientation half matters more than the packing half: a sprite stored
+    the wrong way up still assembles and still draws, just wrongly, so the
+    test art here is deliberately asymmetric top-to-bottom and the check is
+    that the LAST scanline is emitted first.
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        return SKIP, "needs Pillow"
+    import mksprite
+
+    for mode, ncol in (("160A", 4), ("320A", 2)):
+        bpp, ppb = mksprite.MODES[mode]
+        w, h = ppb * 2, 4
+        img = Image.new("RGB", (w, h))
+        shades = [(0, 0, 0), (90, 90, 90), (180, 180, 180), (255, 255, 255)][:ncol]
+        want = []
+        for y in range(h):
+            row = []
+            for x in range(w):
+                idx = (x + y) % ncol
+                row.append(idx)
+                img.putpixel((x, y), shades[idx])
+            want.append(row)
+        cmap = mksprite.build_map(img, bpp, None)
+        rows, width = mksprite.pack(img, mode, 1, cmap)
+        if width != w // ppb:
+            raise AssertionError("%s: width %d, expected %d" % (mode, width, w // ppb))
+        got = mksprite.unpack(rows, width, 1, mode)
+        if got != want:
+            raise AssertionError("%s: pack/unpack did not round-trip" % mode)
+
+        text = mksprite.emit(rows, width, 1, "art", mode, "test.png")
+        body = [l for l in text.split("\n") if l.strip().startswith(".byte")]
+        first = [int(t, 16) for t in body[0].split(";")[0].replace(".byte", "").replace("$", "").split(",")]
+        if bytes(first) != rows[-1]:
+            raise AssertionError("%s: emitted top row first; MARIA reads "
+                                 "bottom-first" % mode)
+
+    # frames pack side by side at a stride of one frame's width
+    img = Image.new("RGB", (16, 2))
+    for x in range(16):
+        img.putpixel((x, 0), (255, 255, 255) if x < 8 else (0, 0, 0))
+        img.putpixel((x, 1), (255, 255, 255) if x < 8 else (0, 0, 0))
+    cmap = mksprite.build_map(img, 2, None)
+    rows, width = mksprite.pack(img, "160A", 2, cmap)
+    if width != 2:
+        raise AssertionError("two frames of 8 pixels should be 2 bytes wide")
+    if len(rows[0]) != 4:
+        raise AssertionError("a scanline of 2 frames x 2 bytes should be 4")
+    if rows[0][:2] == rows[0][2:]:
+        raise AssertionError("the two frames packed identically; the split "
+                             "is in the wrong place")
+    return "160A and 320A round-trip; rows emitted bottom-first; frames stride"
+
+
+def t_sim_compare():
+    """sim.py's score must measure the player, not the phase of the clock.
+
+    The first version of it counted rows landing on the same frame with the
+    same values, which conflated "plays the right notes" with "keeps
+    playing", and was chaotic: two builds of the simulator differing by 17
+    cycles a frame scored 6.3% and 0.1%. This checks the replacement is
+    insensitive to frame numbering and separates the two questions.
+    """
+    import sim
+
+    def log(rows):
+        return [(f, tuple(v.split())) for f, v in rows]
+
+    ref = log([(10, "00 01"), (20, "00 02"), (30, "00 03"),
+               (40, "00 04"), (50, "00 05"), (60, "00 06")])
+
+    same = sim.compare(ref, ref)
+    if same["agreement"] < 0.999 or same["progress"] < 0.999:
+        raise AssertionError("a log does not match itself: %r" % same)
+
+    # Same states, every frame number shifted. Must score identically.
+    shifted = log([(f + 977, v) for f, v in
+                   [(10, "00 01"), (20, "00 02"), (30, "00 03"),
+                    (40, "00 04"), (50, "00 05"), (60, "00 06")]])
+    sh = sim.compare(shifted, ref)
+    if sh["agreement"] < 0.999 or sh["progress"] < 0.999:
+        raise AssertionError("frame offset changed the score: %r" % sh)
+
+    # Correct as far as it goes, then stops: agreement high, progress low.
+    short = log([(10, "00 01"), (20, "00 02")])
+    st = sim.compare(short, ref)
+    if st["agreement"] < 0.999:
+        raise AssertionError("a correct prefix should agree fully: %r" % st)
+    if not 0.2 < st["progress"] < 0.5:
+        raise AssertionError("a third of the way through should read as such: "
+                             "%r" % st)
+
+    # Wrong notes: agreement must collapse even though the count matches.
+    wrong = log([(10, "0A 0B"), (20, "0C 0D"), (30, "0E 0F"),
+                 (40, "10 11"), (50, "12 13"), (60, "14 15")])
+    wr = sim.compare(wrong, ref)
+    if wr["agreement"] > 0.01:
+        raise AssertionError("unrelated states should not agree: %r" % wr)
+
+    # A state held for many frames is one event, not many.
+    held = log([(10, "00 01"), (11, "00 01"), (12, "00 01"), (20, "00 02")])
+    if len(sim.states(held)) != 2:
+        raise AssertionError("repeated rows should collapse to one state")
+    return "frame-shift invariant; separates agreement from progress"
+
+
+def t_sim_random():
+    """POKEY's RANDOM must not be a constant.
+
+    Ballblazer generates its music instead of playing a score, and asks
+    POKEY for the entropy: `CMP $400A / BCS` skips the note when the
+    comparison fails. A simulator returning zero there makes the branch
+    always skip, so the engine runs, emits nothing, and the game plays
+    silence through a player that is working perfectly. That was a real bug
+    here and it took a long time to find, so this pins the register down.
+    """
+    import sim, cart as cart_module
+
+    class FakeCart(object):
+        nbanks = 1
+        def pokeys(self):
+            return [0x4000]
+        def space_of(self, a, b):
+            return None
+        def byte(self, sp, a):
+            return 0xFF
+
+    bus = sim.Bus(FakeCart())
+    cyc = [0]
+    bus.cpu_cycles = lambda: cyc[0]
+    seen = set()
+    for step in range(64):
+        cyc[0] += 37
+        seen.add(bus.read(0x400A))
+    if len(seen) < 8:
+        raise AssertionError("RANDOM returned %d distinct values in 64 reads; "
+                             "it is effectively a constant" % len(seen))
+    if seen == {0} or seen == {0xFF}:
+        raise AssertionError("RANDOM is stuck at a single value")
+    return "%d distinct values over 64 reads" % len(seen)
+
+
 def t_cycles():
     import m6502
     if len(m6502.CYCLES) != 256:
@@ -571,436 +854,6 @@ def t_handler_attributes():
     return "%d scripts, no attribute built from quote-bearing JSON" % checked
 
 
-def t_dist_carries_no_rom():
-    """The published patches must not smuggle the cartridge out with them.
-
-    `dist/` is the one directory in this repository that holds build output,
-    and it holds it because both formats there are meant to travel without
-    the game. That is a claim about bytes, so it is checked rather than
-    believed -- the same standard `recipes carry no payload` holds
-    `portkit.py` to.
-
-    For a BPS the question is what its literals are. The encoder emits a
-    literal only for a run that differs from the source, so in principle
-    every stored byte is the patch author's; this confirms it by decoding
-    each patch and comparing every literal against the original at the same
-    address. One match would mean a byte of the game riding along.
-
-    For the patch set the question is different, because it stores whole
-    blobs. Its sections must describe their pre-image with a CRC32 and never
-    quote it, and its float blobs -- code with no fixed home -- must be
-    authored rather than lifted, so none of them may appear anywhere in the
-    cartridge.
-
-    Skips without a dump, like the other cartridge-dependent checks: with no
-    original to compare against there is nothing to be sure of.
-    """
-    import json
-    import zipfile
-
-    root = os.path.dirname(HERE)
-    dist = os.path.join(root, "dist")
-    if not os.path.isdir(dist):
-        return None
-
-    import importlib.util
-    kp = os.path.join(root, "patches", "karateka.py")
-    if not os.path.exists(kp):
-        return None
-    spec = importlib.util.spec_from_file_location("karateka_dist", kp)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    try:
-        _src, _hdr, orig = mod.load_source()
-    except SystemExit:
-        return None
-
-    sys.path.insert(0, HERE)
-    import bps as bpsmod
-
-    literals = leaked = 0
-    for name in sorted(os.listdir(dist)):
-        if not name.endswith(".bps"):
-            continue
-        patch = io.open(os.path.join(dist, name), "rb").read()
-        h = bpsmod.read_header(patch)
-        i, pos = h["actions_at"], 0
-        while i < h["body_end"]:
-            v, i = bpsmod.decode_number(patch, i)
-            act, ln = v & 3, (v >> 2) + 1
-            if act == bpsmod.SOURCE_READ:
-                pos += ln
-            elif act == bpsmod.TARGET_READ:
-                for k in range(ln):
-                    literals += 1
-                    if pos + k < len(orig) and orig[pos + k] == patch[i + k]:
-                        leaked += 1
-                i += ln
-                pos += ln
-            else:
-                _o, i = bpsmod.decode_number(patch, i)
-                pos += ln
-    if leaked:
-        raise AssertionError(
-            "%d of %d literal bytes in dist/*.bps are the original "
-            "cartridge's own; these patches are not safe to publish"
-            % (leaked, literals))
-
-    abp = os.path.join(dist, "karateka.abp")
-    if os.path.exists(abp):
-        z = zipfile.ZipFile(abp)
-        man = json.loads(z.read("patchset.json"))
-        rows = man["sections"]
-        rows = rows if isinstance(rows, list) else list(rows.values())
-        for r in rows:
-            for k, v in r.items():
-                if k != "crc32" and isinstance(v, str) and len(v) >= 8 \
-                        and all(c in "0123456789abcdefABCDEF" for c in v):
-                    raise AssertionError(
-                        "section %r stores what looks like byte data in %r; "
-                        "sections must carry a CRC32 of the pre-image, not "
-                        "the pre-image" % (r.get("what", "?"), k))
-        for n in z.namelist():
-            if n.startswith("f/") and z.read(n) in orig:
-                raise AssertionError(
-                    "float blob %s appears verbatim in the cartridge, so it "
-                    "is lifted rather than authored" % n)
-
-    return "%d literal bytes across dist/, none of them the cartridge's" % literals
-
-
-def t_portkit_refuses_payload():
-    """A conversion recipe must carry coordinates, never content.
-
-    `portkit.py` exists because a BPS patch cannot express a build that draws
-    on two sources: the delta from a 7800 cartridge to a conversion using Atari
-    8-bit artwork would contain all of that artwork, so the "patch" would be a
-    redistribution wearing a diff's clothes. A recipe avoids that by holding
-    only hashes, offsets and lengths -- and that only holds while nobody
-    embeds "just one table" inline.
-
-    So the rule is enforced in code, and this checks the enforcement works in
-    both directions: it fires on embedded data, and it does not fire on an
-    ordinary recipe. A guard that cannot be shown to trip is decoration.
-    """
-    import base64
-    import json
-    import portkit
-
-    good = {
-        "name": "test",
-        "sources": {"disk": {"what": "a disk", "sha256": "00" * 32}},
-        "regions": {"art": {"from": "disk", "sector": 10, "sectors": 2,
-                            "sha256": "11" * 32, "what": "some artwork"}},
-        "new": ["src/main.s"],
-    }
-    path = os.path.join(tempfile.gettempdir(), "portkit-good.json")
-    with io.open(path, "w", encoding="utf-8") as f:
-        f.write(json.dumps(good))
-    portkit.load_recipe(path)          # must not raise
-
-    for key in ("data", "bytes", "payload", "base64", "hex"):
-        bad = json.loads(json.dumps(good))
-        bad["regions"]["art"][key] = base64.b64encode(b"\xAA" * 400).decode()
-        p2 = os.path.join(tempfile.gettempdir(), "portkit-bad.json")
-        with io.open(p2, "w", encoding="utf-8") as f:
-            f.write(json.dumps(bad))
-        try:
-            portkit.load_recipe(p2)
-        except portkit.RecipeError:
-            continue
-        raise AssertionError(
-            "a recipe carrying %d bytes under %r was accepted; the rule that "
-            "makes this safe to publish is not being enforced"
-            % (400, key))
-
-    # a long prose note is not payload, and must still be allowed
-    wordy = json.loads(json.dumps(good))
-    wordy["note"] = "why this exists. " * 40
-    p3 = os.path.join(tempfile.gettempdir(), "portkit-wordy.json")
-    with io.open(p3, "w", encoding="utf-8") as f:
-        f.write(json.dumps(wordy))
-    portkit.load_recipe(p3)
-
-    return ("a recipe carrying embedded data is refused under every name "
-            "tried, and ordinary recipes still load")
-
-
-def t_forth_decompiler():
-    """The Forth decompiler, against an image built to be one.
-
-    `forth.py` finds a threaded image's interpreter by shape -- the inner loop
-    every primitive jumps to, the routine that saves the thread pointer, the
-    one that restores it, the word that eats the following cell -- and then
-    walks the thread. All four have to be right together: get the literal
-    wrong and every number in the program decompiles as a call to whatever
-    address it happens to equal, which reads perfectly and means nothing.
-
-    So this assembles a small indirect-threaded image with a known kernel and
-    two known definitions, and checks the tool recovers all of it. Synthetic,
-    so the package stays ROM-free and the test states the format rather than
-    depending on one cartridge.
-    """
-    import forth
-
-    BASE, SIZE = 0x4000, 0x1000
-    IP = 0xE8
-    NEXT = 0x4000
-    DOCOL = 0x4030
-    BRTAIL = 0x4050          # IP += inline cell
-    SKIPTAIL = 0x4060        # IP += 2
-    LIT = 0x4070             # word; its code is at LIT+2
-    EXIT = 0x4080
-    BRANCH = 0x4090
-    ADD = 0x40A0             # an ordinary primitive
-    DEF1 = 0x4100
-    DEF2 = 0x4140
-
-    img = bytearray(b"\xFF" * SIZE)
-
-    def put(addr, data):
-        img[addr - BASE:addr - BASE + len(data)] = bytes(data)
-
-    def word(addr, v):
-        put(addr, [v & 0xFF, v >> 8])
-
-    # NEXT: LDY #1 / LDA (IP),Y / STA $EC / DEY / LDA (IP),Y / STA $EB
-    #       / CLC / LDA IP / ADC #2 / STA IP / BCC / INC IP+1 / JMP ($00EA)
-    put(NEXT, [0xA0, 0x01, 0xB1, IP, 0x85, 0xEC, 0x88, 0xB1, IP, 0x85, 0xEB,
-               0x18, 0xA5, IP, 0x69, 0x02, 0x85, IP, 0x90, 0x02, 0xE6, IP + 1,
-               0x4C, 0xEA, 0x00])
-    # DOCOL: LDA IP+1 / PHA / LDA IP / PHA / ... / JMP NEXT
-    put(DOCOL, [0xA5, IP + 1, 0x48, 0xA5, IP, 0x48, 0x18, 0xA5, 0xEB,
-                0x69, 0x02, 0x85, IP, 0x98, 0x65, 0xEC, 0x85, IP + 1,
-                0x4C, NEXT & 0xFF, NEXT >> 8])
-    # the two tails that mean "the next cell is data"
-    put(BRTAIL, [0x18, 0xB1, IP, 0x65, IP, 0x85, IP,
-                 0x4C, NEXT & 0xFF, NEXT >> 8])
-    put(SKIPTAIL, [0x18, 0xA5, IP, 0x69, 0x02, 0x85, IP,
-                   0x4C, NEXT & 0xFF, NEXT >> 8])
-    # LIT: reads through IP and steps it, then NEXT
-    word(LIT, LIT + 2)
-    put(LIT + 2, [0xB1, IP, 0x48, 0xE6, IP, 0xD0, 0x02, 0xE6, IP + 1,
-                  0x4C, NEXT & 0xFF, NEXT >> 8])
-    # EXIT: pulls the saved thread pointer back
-    word(EXIT, EXIT + 2)
-    put(EXIT + 2, [0x68, 0x85, IP, 0x68, 0x85, IP + 1,
-                   0x4C, NEXT & 0xFF, NEXT >> 8])
-    # BRANCH: jumps straight to the tail that adds the inline cell
-    word(BRANCH, BRANCH + 2)
-    put(BRANCH + 2, [0x4C, BRTAIL & 0xFF, BRTAIL >> 8])
-    # an ordinary primitive, which must NOT be read as taking a cell
-    word(ADD, ADD + 2)
-    put(ADD + 2, [0xB5, 0x00, 0x75, 0x02, 0x95, 0x02, 0xE8, 0xE8,
-                  0x4C, NEXT & 0xFF, NEXT >> 8])
-
-    # : DEF1  LIT 1234  ADD  DEF2  BRANCH <8>  EXIT ;
-    word(DEF1, DOCOL)
-    for i, cell in enumerate([LIT, 0x1234, ADD, DEF2, BRANCH, 0x0008, EXIT]):
-        word(DEF1 + 2 + i * 2, cell)
-    # : DEF2  ADD  EXIT ;
-    word(DEF2, DOCOL)
-    for i, cell in enumerate([ADD, EXIT]):
-        word(DEF2 + 2 + i * 2, cell)
-
-    class FakeCart(object):
-        def __init__(self, blob):
-            self.rom = bytes(blob)
-            self.info = {"title": "synthetic forth"}
-
-        def spaces(self):
-            return ["rom"]
-
-        def base_of(self, _s):
-            return BASE
-
-        def size_of(self, _s):
-            return SIZE
-
-        def byte(self, _s, addr):
-            i = addr - BASE
-            if not 0 <= i < SIZE:
-                raise IndexError("outside the image")
-            return self.rom[i]
-
-        def slice(self, _s, addr, n):
-            i = addr - BASE
-            if i < 0 or i + n > SIZE:
-                raise IndexError("outside the image")
-            return self.rom[i:i + n]
-
-    cart = FakeCart(img)
-    im = forth.Image(cart, "rom").discover()
-
-    for name, want, got in (("NEXT", NEXT, im.next), ("DOCOL", DOCOL, im.docol),
-                            ("EXIT", EXIT, im.exit), ("literal", LIT, im.lit)):
-        if got != want:
-            raise AssertionError("%s found at %s, expected $%04X"
-                                 % (name, ("$%04X" % got) if got else "nothing",
-                                    want))
-    if im.ip_pointer() != IP:
-        raise AssertionError("thread pointer read as $%02X, expected $%02X"
-                             % (im.ip_pointer() or 0, IP))
-
-    # the branch must be seen to eat a cell, and the ordinary word must not
-    if not im.is_branch(BRANCH):
-        raise AssertionError("the branch was not recognised as taking an "
-                             "inline cell, so its destination decompiles as a "
-                             "call")
-    if im.is_branch(ADD):
-        raise AssertionError("an ordinary primitive was read as taking an "
-                             "inline cell, which swallows the word after it")
-
-    cells = im.body(DEF1)
-    kinds = [(c, k) for _a, c, k in cells]
-    want = [(LIT, "word"), (0x1234, "data"), (ADD, "word"), (DEF2, "word"),
-            (BRANCH, "word"), (0x0008, "data"), (EXIT, "word")]
-    if kinds != want:
-        raise AssertionError("the definition decompiled as %r, expected %r"
-                             % (kinds, want))
-
-    defs = im.definitions()
-    if DEF1 not in defs or DEF2 not in defs:
-        raise AssertionError("found definitions %s, expected both $%04X and "
-                             "$%04X" % (["$%04X" % d for d in defs], DEF1, DEF2))
-    callers = im.xref(defs)
-    if callers.get(DEF2) != [DEF1]:
-        raise AssertionError("cross-reference says $%04X is named by %s, "
-                             "expected [$%04X]"
-                             % (DEF2, callers.get(DEF2), DEF1))
-    if im.kind_of(DEF1) != "colon" or im.kind_of(ADD) != "code":
-        raise AssertionError("a definition and a primitive were not told apart")
-
-    return ("interpreter located by shape, thread walked, literals and branch "
-            "destinations kept out of the word stream")
-
-
-def t_engine_finder():
-    """The engine hunter, against a cartridge built to have exactly one.
-
-    `audiotrace.py --engine` searches a cartridge for the Atari in-house music
-    engine by the shape of its tables. A search like that is only worth having
-    if a wrong answer is impossible rather than merely unlikely, so this builds
-    an image whose engine is at known addresses and checks all four are found.
-
-    Synthetic rather than a real cartridge, so the package stays ROM-free and
-    the test states the format instead of assuming a particular game.
-    """
-    import audiotrace
-
-    DUR = [0x60, 0x48, 0x40, 0x30, 0x24, 0x20, 0x18, 0x12,
-           0x10, 0x0C, 0x09, 0x08, 0x06, 0x04, 0x03, 0x02]
-    BASE, SIZE = 0x4000, 0x1000
-    DURS, INSTR = 0x4100, 0x4110
-    PAT_A, PAT_B = 0x4300, 0x4320
-    TRK_1, TRK_2 = 0x4400, 0x4410
-    SONGS = 0x4500
-
-    img = bytearray(SIZE)
-
-    def put(addr, data):
-        img[addr - BASE:addr - BASE + len(data)] = bytes(data)
-
-    def word(addr, value):
-        put(addr, [value & 0xFF, value >> 8])
-
-    put(DURS, DUR)
-    for k in range(16):
-        # ten bytes used, six of padding -- the shape the search keys on
-        put(INSTR + k * 16, [0xA0, 0x01, 0x80, 0x80, 0x05,
-                             0x02, 0x13, 0x01, 0x28, k + 1] + [0] * 6)
-    # Fence the table with words that cannot resolve, so its start and end are
-    # unambiguous. Without this the run can begin a couple of bytes early on
-    # padding, and -- because every song here has the same two pointers -- a
-    # four-voice reading of the same bytes validates just as well as the real
-    # two-voice one and outscores it. Real tables are not that uniform; a test
-    # image has to be fenced deliberately to stand in for that.
-    for a in range(0x44F0, 0x4500):
-        img[a - BASE] = 0xFF
-    put(PAT_A, [4] + [0x16, 0x60, 0x1B, 0x48, 0x1B, 0x48, 0x13, 0x55])
-    put(PAT_B, [3] + [0x1C, 0x23, 0x1C, 0x2A, 0x13, 0x90])
-    word(TRK_1, PAT_A)
-    word(TRK_1 + 2, PAT_B)
-    word(TRK_1 + 4, 0x0009)          # high byte zero ends the list
-    word(TRK_2, PAT_B)
-    word(TRK_2 + 2, 0x0000)
-    for n in range(6):               # six songs, two voices, stride 4
-        word(SONGS + n * 4, TRK_1)
-        word(SONGS + n * 4 + 2, TRK_2)
-    # Six two-voice songs is 24 bytes, which is three four-voice entries and a
-    # remainder -- so a four-voice reading runs into the fence after three and
-    # falls short of the minimum, while the two-voice reading gets all six.
-    for a in range(SONGS + 24, SONGS + 40):
-        img[a - BASE] = 0xFF
-
-    class FakeCart(object):
-        """One fixed space, which is all the search needs."""
-
-        def __init__(self, blob):
-            self.rom = bytes(blob)
-            self.info = {"title": "synthetic"}
-
-        def spaces(self):
-            return ["f0"]
-
-        def base_of(self, _sp):
-            return BASE
-
-        def size_of(self, _sp):
-            return SIZE
-
-        def pokeys(self):
-            return []
-
-        def byte(self, _sp, addr):
-            i = addr - BASE
-            if not 0 <= i < SIZE:
-                raise IndexError("outside the image")
-            return self.rom[i]
-
-        def slice(self, _sp, addr, n):
-            i = addr - BASE
-            if i < 0 or i + n > SIZE:
-                raise IndexError("outside the image")
-            return self.rom[i:i + n]
-
-        def space_of(self, addr, _bank=None):
-            return "f0" if BASE <= addr < BASE + SIZE else None
-
-    cart = FakeCart(img)
-    found = audiotrace.find_engine(cart)
-    if not found:
-        raise AssertionError("the engine hunter found nothing in an image "
-                             "built to contain exactly one")
-    for name, want, got in (("instruments", INSTR, found["instruments"]),
-                            ("durations", DURS, found["durations"]),
-                            ("song table", SONGS, found["songs"])):
-        if got != want:
-            raise AssertionError("%s found at $%04X, expected $%04X"
-                                 % (name, got, want))
-    if found["voices"] != 2 or found["stride"] != 4:
-        raise AssertionError("read %d voices at stride %d, expected 2 at 4"
-                             % (found["voices"], found["stride"]))
-    if found["verified"] < 6:
-        raise AssertionError("only %d of 6 songs followed down to patterns"
-                             % found["verified"])
-    if found["duration_values"] != DUR:
-        raise AssertionError("duration table read back wrong")
-
-    # ...and the format it writes must describe the same thing
-    doc = audiotrace.engine_format(cart, "synthetic.a78", found)
-    import songfmt
-    pulled = songfmt.pull(cart, doc)
-    if len(pulled["songs"]) != 6:
-        raise AssertionError("the emitted format pulls %d songs, not 6"
-                             % len(pulled["songs"]))
-    if set(pulled["patterns"]) != {"f0:%04X" % PAT_A, "f0:%04X" % PAT_B}:
-        raise AssertionError("the emitted format resolves the wrong patterns: "
-                             "%s" % sorted(pulled["patterns"]))
-    return ("engine located at its known addresses, and the format it emits "
-            "pulls the same songs back")
-
-
 def t_direct_format():
     """A reading saved by explore.py reads back as the same notes.
 
@@ -1426,6 +1279,305 @@ def t_formats():
     return "%d format files, each fingerprinted and unique" % len(seen)
 
 
+def t_disasm(rom):
+    if not rom:
+        return None
+    out = tempfile.mkdtemp(prefix="selftest-")
+    p = subprocess.run([sys.executable, os.path.join(HERE, "disasm.py"), rom,
+                        "-o", out], stdout=subprocess.PIPE,
+                       stderr=subprocess.STDOUT)
+    if p.returncode != 0:
+        raise AssertionError("disasm exited %d" % p.returncode)
+    listings = glob.glob(os.path.join(out, "*.asm"))
+    if not listings:
+        raise AssertionError("no listings written")
+    return "%d listings written" % len(listings)
+
+
+# ----------------------------------------------------------------- merged in
+# These seven come from the tree this toolkit was forked into for
+# the Karateka work. They cover the tools that arrived with them
+# -- a8dis, portscan, forth, patchset, portkit -- plus the two
+# guarantees those tools make: that a conversion recipe carries
+# coordinates and not content, and that a published patch carries
+# none of the cartridge it patches.
+
+
+def t_engine_finder():
+    """The engine hunter, against a cartridge built to have exactly one.
+
+    `audiotrace.py --engine` searches a cartridge for the Atari in-house music
+    engine by the shape of its tables. A search like that is only worth having
+    if a wrong answer is impossible rather than merely unlikely, so this builds
+    an image whose engine is at known addresses and checks all four are found.
+
+    Synthetic rather than a real cartridge, so the package stays ROM-free and
+    the test states the format instead of assuming a particular game.
+    """
+    import audiotrace
+
+    DUR = [0x60, 0x48, 0x40, 0x30, 0x24, 0x20, 0x18, 0x12,
+           0x10, 0x0C, 0x09, 0x08, 0x06, 0x04, 0x03, 0x02]
+    BASE, SIZE = 0x4000, 0x1000
+    DURS, INSTR = 0x4100, 0x4110
+    PAT_A, PAT_B = 0x4300, 0x4320
+    TRK_1, TRK_2 = 0x4400, 0x4410
+    SONGS = 0x4500
+
+    img = bytearray(SIZE)
+
+    def put(addr, data):
+        img[addr - BASE:addr - BASE + len(data)] = bytes(data)
+
+    def word(addr, value):
+        put(addr, [value & 0xFF, value >> 8])
+
+    put(DURS, DUR)
+    for k in range(16):
+        # ten bytes used, six of padding -- the shape the search keys on
+        put(INSTR + k * 16, [0xA0, 0x01, 0x80, 0x80, 0x05,
+                             0x02, 0x13, 0x01, 0x28, k + 1] + [0] * 6)
+    # Fence the table with words that cannot resolve, so its start and end are
+    # unambiguous. Without this the run can begin a couple of bytes early on
+    # padding, and -- because every song here has the same two pointers -- a
+    # four-voice reading of the same bytes validates just as well as the real
+    # two-voice one and outscores it. Real tables are not that uniform; a test
+    # image has to be fenced deliberately to stand in for that.
+    for a in range(0x44F0, 0x4500):
+        img[a - BASE] = 0xFF
+    put(PAT_A, [4] + [0x16, 0x60, 0x1B, 0x48, 0x1B, 0x48, 0x13, 0x55])
+    put(PAT_B, [3] + [0x1C, 0x23, 0x1C, 0x2A, 0x13, 0x90])
+    word(TRK_1, PAT_A)
+    word(TRK_1 + 2, PAT_B)
+    word(TRK_1 + 4, 0x0009)          # high byte zero ends the list
+    word(TRK_2, PAT_B)
+    word(TRK_2 + 2, 0x0000)
+    for n in range(6):               # six songs, two voices, stride 4
+        word(SONGS + n * 4, TRK_1)
+        word(SONGS + n * 4 + 2, TRK_2)
+    # Six two-voice songs is 24 bytes, which is three four-voice entries and a
+    # remainder -- so a four-voice reading runs into the fence after three and
+    # falls short of the minimum, while the two-voice reading gets all six.
+    for a in range(SONGS + 24, SONGS + 40):
+        img[a - BASE] = 0xFF
+
+    class FakeCart(object):
+        """One fixed space, which is all the search needs."""
+
+        def __init__(self, blob):
+            self.rom = bytes(blob)
+            self.info = {"title": "synthetic"}
+
+        def spaces(self):
+            return ["f0"]
+
+        def base_of(self, _sp):
+            return BASE
+
+        def size_of(self, _sp):
+            return SIZE
+
+        def pokeys(self):
+            return []
+
+        def byte(self, _sp, addr):
+            i = addr - BASE
+            if not 0 <= i < SIZE:
+                raise IndexError("outside the image")
+            return self.rom[i]
+
+        def slice(self, _sp, addr, n):
+            i = addr - BASE
+            if i < 0 or i + n > SIZE:
+                raise IndexError("outside the image")
+            return self.rom[i:i + n]
+
+        def space_of(self, addr, _bank=None):
+            return "f0" if BASE <= addr < BASE + SIZE else None
+
+    cart = FakeCart(img)
+    found = audiotrace.find_engine(cart)
+    if not found:
+        raise AssertionError("the engine hunter found nothing in an image "
+                             "built to contain exactly one")
+    for name, want, got in (("instruments", INSTR, found["instruments"]),
+                            ("durations", DURS, found["durations"]),
+                            ("song table", SONGS, found["songs"])):
+        if got != want:
+            raise AssertionError("%s found at $%04X, expected $%04X"
+                                 % (name, got, want))
+    if found["voices"] != 2 or found["stride"] != 4:
+        raise AssertionError("read %d voices at stride %d, expected 2 at 4"
+                             % (found["voices"], found["stride"]))
+    if found["verified"] < 6:
+        raise AssertionError("only %d of 6 songs followed down to patterns"
+                             % found["verified"])
+    if found["duration_values"] != DUR:
+        raise AssertionError("duration table read back wrong")
+
+    # ...and the format it writes must describe the same thing
+    doc = audiotrace.engine_format(cart, "synthetic.a78", found)
+    import songfmt
+    pulled = songfmt.pull(cart, doc)
+    if len(pulled["songs"]) != 6:
+        raise AssertionError("the emitted format pulls %d songs, not 6"
+                             % len(pulled["songs"]))
+    if set(pulled["patterns"]) != {"f0:%04X" % PAT_A, "f0:%04X" % PAT_B}:
+        raise AssertionError("the emitted format resolves the wrong patterns: "
+                             "%s" % sorted(pulled["patterns"]))
+    return ("engine located at its known addresses, and the format it emits "
+            "pulls the same songs back")
+
+
+def t_forth_decompiler():
+    """The Forth decompiler, against an image built to be one.
+
+    `forth.py` finds a threaded image's interpreter by shape -- the inner loop
+    every primitive jumps to, the routine that saves the thread pointer, the
+    one that restores it, the word that eats the following cell -- and then
+    walks the thread. All four have to be right together: get the literal
+    wrong and every number in the program decompiles as a call to whatever
+    address it happens to equal, which reads perfectly and means nothing.
+
+    So this assembles a small indirect-threaded image with a known kernel and
+    two known definitions, and checks the tool recovers all of it. Synthetic,
+    so the package stays ROM-free and the test states the format rather than
+    depending on one cartridge.
+    """
+    import forth
+
+    BASE, SIZE = 0x4000, 0x1000
+    IP = 0xE8
+    NEXT = 0x4000
+    DOCOL = 0x4030
+    BRTAIL = 0x4050          # IP += inline cell
+    SKIPTAIL = 0x4060        # IP += 2
+    LIT = 0x4070             # word; its code is at LIT+2
+    EXIT = 0x4080
+    BRANCH = 0x4090
+    ADD = 0x40A0             # an ordinary primitive
+    DEF1 = 0x4100
+    DEF2 = 0x4140
+
+    img = bytearray(b"\xFF" * SIZE)
+
+    def put(addr, data):
+        img[addr - BASE:addr - BASE + len(data)] = bytes(data)
+
+    def word(addr, v):
+        put(addr, [v & 0xFF, v >> 8])
+
+    # NEXT: LDY #1 / LDA (IP),Y / STA $EC / DEY / LDA (IP),Y / STA $EB
+    #       / CLC / LDA IP / ADC #2 / STA IP / BCC / INC IP+1 / JMP ($00EA)
+    put(NEXT, [0xA0, 0x01, 0xB1, IP, 0x85, 0xEC, 0x88, 0xB1, IP, 0x85, 0xEB,
+               0x18, 0xA5, IP, 0x69, 0x02, 0x85, IP, 0x90, 0x02, 0xE6, IP + 1,
+               0x4C, 0xEA, 0x00])
+    # DOCOL: LDA IP+1 / PHA / LDA IP / PHA / ... / JMP NEXT
+    put(DOCOL, [0xA5, IP + 1, 0x48, 0xA5, IP, 0x48, 0x18, 0xA5, 0xEB,
+                0x69, 0x02, 0x85, IP, 0x98, 0x65, 0xEC, 0x85, IP + 1,
+                0x4C, NEXT & 0xFF, NEXT >> 8])
+    # the two tails that mean "the next cell is data"
+    put(BRTAIL, [0x18, 0xB1, IP, 0x65, IP, 0x85, IP,
+                 0x4C, NEXT & 0xFF, NEXT >> 8])
+    put(SKIPTAIL, [0x18, 0xA5, IP, 0x69, 0x02, 0x85, IP,
+                   0x4C, NEXT & 0xFF, NEXT >> 8])
+    # LIT: reads through IP and steps it, then NEXT
+    word(LIT, LIT + 2)
+    put(LIT + 2, [0xB1, IP, 0x48, 0xE6, IP, 0xD0, 0x02, 0xE6, IP + 1,
+                  0x4C, NEXT & 0xFF, NEXT >> 8])
+    # EXIT: pulls the saved thread pointer back
+    word(EXIT, EXIT + 2)
+    put(EXIT + 2, [0x68, 0x85, IP, 0x68, 0x85, IP + 1,
+                   0x4C, NEXT & 0xFF, NEXT >> 8])
+    # BRANCH: jumps straight to the tail that adds the inline cell
+    word(BRANCH, BRANCH + 2)
+    put(BRANCH + 2, [0x4C, BRTAIL & 0xFF, BRTAIL >> 8])
+    # an ordinary primitive, which must NOT be read as taking a cell
+    word(ADD, ADD + 2)
+    put(ADD + 2, [0xB5, 0x00, 0x75, 0x02, 0x95, 0x02, 0xE8, 0xE8,
+                  0x4C, NEXT & 0xFF, NEXT >> 8])
+
+    # : DEF1  LIT 1234  ADD  DEF2  BRANCH <8>  EXIT ;
+    word(DEF1, DOCOL)
+    for i, cell in enumerate([LIT, 0x1234, ADD, DEF2, BRANCH, 0x0008, EXIT]):
+        word(DEF1 + 2 + i * 2, cell)
+    # : DEF2  ADD  EXIT ;
+    word(DEF2, DOCOL)
+    for i, cell in enumerate([ADD, EXIT]):
+        word(DEF2 + 2 + i * 2, cell)
+
+    class FakeCart(object):
+        def __init__(self, blob):
+            self.rom = bytes(blob)
+            self.info = {"title": "synthetic forth"}
+
+        def spaces(self):
+            return ["rom"]
+
+        def base_of(self, _s):
+            return BASE
+
+        def size_of(self, _s):
+            return SIZE
+
+        def byte(self, _s, addr):
+            i = addr - BASE
+            if not 0 <= i < SIZE:
+                raise IndexError("outside the image")
+            return self.rom[i]
+
+        def slice(self, _s, addr, n):
+            i = addr - BASE
+            if i < 0 or i + n > SIZE:
+                raise IndexError("outside the image")
+            return self.rom[i:i + n]
+
+    cart = FakeCart(img)
+    im = forth.Image(cart, "rom").discover()
+
+    for name, want, got in (("NEXT", NEXT, im.next), ("DOCOL", DOCOL, im.docol),
+                            ("EXIT", EXIT, im.exit), ("literal", LIT, im.lit)):
+        if got != want:
+            raise AssertionError("%s found at %s, expected $%04X"
+                                 % (name, ("$%04X" % got) if got else "nothing",
+                                    want))
+    if im.ip_pointer() != IP:
+        raise AssertionError("thread pointer read as $%02X, expected $%02X"
+                             % (im.ip_pointer() or 0, IP))
+
+    # the branch must be seen to eat a cell, and the ordinary word must not
+    if not im.is_branch(BRANCH):
+        raise AssertionError("the branch was not recognised as taking an "
+                             "inline cell, so its destination decompiles as a "
+                             "call")
+    if im.is_branch(ADD):
+        raise AssertionError("an ordinary primitive was read as taking an "
+                             "inline cell, which swallows the word after it")
+
+    cells = im.body(DEF1)
+    kinds = [(c, k) for _a, c, k in cells]
+    want = [(LIT, "word"), (0x1234, "data"), (ADD, "word"), (DEF2, "word"),
+            (BRANCH, "word"), (0x0008, "data"), (EXIT, "word")]
+    if kinds != want:
+        raise AssertionError("the definition decompiled as %r, expected %r"
+                             % (kinds, want))
+
+    defs = im.definitions()
+    if DEF1 not in defs or DEF2 not in defs:
+        raise AssertionError("found definitions %s, expected both $%04X and "
+                             "$%04X" % (["$%04X" % d for d in defs], DEF1, DEF2))
+    callers = im.xref(defs)
+    if callers.get(DEF2) != [DEF1]:
+        raise AssertionError("cross-reference says $%04X is named by %s, "
+                             "expected [$%04X]"
+                             % (DEF2, callers.get(DEF2), DEF1))
+    if im.kind_of(DEF1) != "colon" or im.kind_of(ADD) != "code":
+        raise AssertionError("a definition and a primitive were not told apart")
+
+    return ("interpreter located by shape, thread walked, literals and branch "
+            "destinations kept out of the word stream")
+
+
 def t_a8dis():
     """The 8-bit cartridge tracer, against a cartridge built to a known answer.
 
@@ -1508,72 +1660,6 @@ def t_a8dis():
 
     return ("bank switch followed, implied instructions do not end the walk, "
             "%d hardware accesses named by direction" % len(t.hw))
-
-
-def t_karateka_fixes():
-    """The Karateka fixes: no two disagree unless they are the same knob.
-
-    These are meant to be mixed -- cadence, hit window and control mapping are
-    three different things and a build can have all three. But "different
-    things" is a claim about bytes, and one of these fixes was already
-    withdrawn for being wrong about exactly that. So the claim is checked:
-    every fix's writes are collected, every pair compared, and a pair that
-    disagrees about a byte without being two settings of one knob is a
-    failure.
-
-    It also checks each composite really contains the parts it advertises,
-    because a composite that quietly lost one would still look self-consistent
-    from the inside.
-
-    And it pins the dose rule: doses 2 and 4 must come out byte-identical to
-    fixes 4 and 3, which are the two that were measured on real recorded
-    sessions. If the even-spacing rule ever stops reproducing them, the nine
-    dials are no longer the same instrument those numbers came from.
-    """
-    import importlib.util
-
-    path = os.path.join(os.path.dirname(HERE), "patches", "karateka.py")
-    if not os.path.exists(path):
-        return None
-    spec = importlib.util.spec_from_file_location("karateka_patches", path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    # ask the module where the cartridge is rather than re-deriving it:
-    # it searches as well as listing candidates, and a copy of that logic
-    # here would drift and quietly turn this test into a skip
-    try:
-        mod.load_source()
-    except SystemExit:
-        return None
-
-    # check() reports at length; the test wants the verdict, not the report
-    buf, saved = io.StringIO(), sys.stdout
-    try:
-        sys.stdout = buf
-        rc = mod.check()
-    finally:
-        sys.stdout = saved
-    if rc != 0:
-        raise AssertionError(
-            "the fixes conflict; run patches/karateka.py --check for "
-            "which:\n%s" % "\n".join(
-                l for l in buf.getvalue().splitlines() if "CONFLICT" in l))
-
-    _src, _hdr, rom = mod.load_source()
-    for dose, n in ((4, 3), (2, 4)):
-        a = mod.Patcher(rom)
-        mod.fix_input_latch(a)
-        mod._skip_waits(a, mod.dose_indices(dose))
-        b = mod.Patcher(rom)
-        [f for f in mod.FIXES if f["n"] == n][0]["apply"](b)
-        if bytes(a.rom) != bytes(b.rom):
-            raise AssertionError(
-                "dose %d no longer matches fix %d, so the measured frame "
-                "counts do not describe the doses" % (dose, n))
-
-    live = [f for f in mod.FIXES if not f.get("withdrawn")]
-    return ("%d live fixes, no conflicting pair, every composite contains its "
-            "parts, doses 2 and 4 still equal fixes 4 and 3" % len(live))
 
 
 def t_patchset():
@@ -1876,19 +1962,225 @@ def t_patchset():
             "inside a float stay apart")
 
 
-def t_disasm(rom):
-    if not rom:
+def t_portkit_refuses_payload():
+    """A conversion recipe must carry coordinates, never content.
+
+    `portkit.py` exists because a BPS patch cannot express a build that draws
+    on two sources: the delta from a 7800 cartridge to a conversion using Atari
+    8-bit artwork would contain all of that artwork, so the "patch" would be a
+    redistribution wearing a diff's clothes. A recipe avoids that by holding
+    only hashes, offsets and lengths -- and that only holds while nobody
+    embeds "just one table" inline.
+
+    So the rule is enforced in code, and this checks the enforcement works in
+    both directions: it fires on embedded data, and it does not fire on an
+    ordinary recipe. A guard that cannot be shown to trip is decoration.
+    """
+    import base64
+    import json
+    import portkit
+
+    good = {
+        "name": "test",
+        "sources": {"disk": {"what": "a disk", "sha256": "00" * 32}},
+        "regions": {"art": {"from": "disk", "sector": 10, "sectors": 2,
+                            "sha256": "11" * 32, "what": "some artwork"}},
+        "new": ["src/main.s"],
+    }
+    path = os.path.join(tempfile.gettempdir(), "portkit-good.json")
+    with io.open(path, "w", encoding="utf-8") as f:
+        f.write(json.dumps(good))
+    portkit.load_recipe(path)          # must not raise
+
+    for key in ("data", "bytes", "payload", "base64", "hex"):
+        bad = json.loads(json.dumps(good))
+        bad["regions"]["art"][key] = base64.b64encode(b"\xAA" * 400).decode()
+        p2 = os.path.join(tempfile.gettempdir(), "portkit-bad.json")
+        with io.open(p2, "w", encoding="utf-8") as f:
+            f.write(json.dumps(bad))
+        try:
+            portkit.load_recipe(p2)
+        except portkit.RecipeError:
+            continue
+        raise AssertionError(
+            "a recipe carrying %d bytes under %r was accepted; the rule that "
+            "makes this safe to publish is not being enforced"
+            % (400, key))
+
+    # a long prose note is not payload, and must still be allowed
+    wordy = json.loads(json.dumps(good))
+    wordy["note"] = "why this exists. " * 40
+    p3 = os.path.join(tempfile.gettempdir(), "portkit-wordy.json")
+    with io.open(p3, "w", encoding="utf-8") as f:
+        f.write(json.dumps(wordy))
+    portkit.load_recipe(p3)
+
+    return ("a recipe carrying embedded data is refused under every name "
+            "tried, and ordinary recipes still load")
+
+
+def t_dist_carries_no_rom():
+    """The published patches must not smuggle the cartridge out with them.
+
+    `dist/` is the one directory in this repository that holds build output,
+    and it holds it because both formats there are meant to travel without
+    the game. That is a claim about bytes, so it is checked rather than
+    believed -- the same standard `recipes carry no payload` holds
+    `portkit.py` to.
+
+    For a BPS the question is what its literals are. The encoder emits a
+    literal only for a run that differs from the source, so in principle
+    every stored byte is the patch author's; this confirms it by decoding
+    each patch and comparing every literal against the original at the same
+    address. One match would mean a byte of the game riding along.
+
+    For the patch set the question is different, because it stores whole
+    blobs. Its sections must describe their pre-image with a CRC32 and never
+    quote it, and its float blobs -- code with no fixed home -- must be
+    authored rather than lifted, so none of them may appear anywhere in the
+    cartridge.
+
+    Skips without a dump, like the other cartridge-dependent checks: with no
+    original to compare against there is nothing to be sure of.
+    """
+    import json
+    import zipfile
+
+    root = os.path.dirname(HERE)
+    dist = os.path.join(root, "dist")
+    if not os.path.isdir(dist):
         return None
-    out = tempfile.mkdtemp(prefix="selftest-")
-    p = subprocess.run([sys.executable, os.path.join(HERE, "disasm.py"), rom,
-                        "-o", out], stdout=subprocess.PIPE,
-                       stderr=subprocess.STDOUT)
-    if p.returncode != 0:
-        raise AssertionError("disasm exited %d" % p.returncode)
-    listings = glob.glob(os.path.join(out, "*.asm"))
-    if not listings:
-        raise AssertionError("no listings written")
-    return "%d listings written" % len(listings)
+
+    import importlib.util
+    kp = os.path.join(root, "patches", "karateka.py")
+    if not os.path.exists(kp):
+        return None
+    spec = importlib.util.spec_from_file_location("karateka_dist", kp)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    try:
+        _src, _hdr, orig = mod.load_source()
+    except SystemExit:
+        return None
+
+    sys.path.insert(0, HERE)
+    import bps as bpsmod
+
+    literals = leaked = 0
+    for name in sorted(os.listdir(dist)):
+        if not name.endswith(".bps"):
+            continue
+        patch = io.open(os.path.join(dist, name), "rb").read()
+        h = bpsmod.read_header(patch)
+        i, pos = h["actions_at"], 0
+        while i < h["body_end"]:
+            v, i = bpsmod.decode_number(patch, i)
+            act, ln = v & 3, (v >> 2) + 1
+            if act == bpsmod.SOURCE_READ:
+                pos += ln
+            elif act == bpsmod.TARGET_READ:
+                for k in range(ln):
+                    literals += 1
+                    if pos + k < len(orig) and orig[pos + k] == patch[i + k]:
+                        leaked += 1
+                i += ln
+                pos += ln
+            else:
+                _o, i = bpsmod.decode_number(patch, i)
+                pos += ln
+    if leaked:
+        raise AssertionError(
+            "%d of %d literal bytes in dist/*.bps are the original "
+            "cartridge's own; these patches are not safe to publish"
+            % (leaked, literals))
+
+    abp = os.path.join(dist, "karateka.abp")
+    if os.path.exists(abp):
+        z = zipfile.ZipFile(abp)
+        man = json.loads(z.read("patchset.json"))
+        rows = man["sections"]
+        rows = rows if isinstance(rows, list) else list(rows.values())
+        for r in rows:
+            for k, v in r.items():
+                if k != "crc32" and isinstance(v, str) and len(v) >= 8 \
+                        and all(c in "0123456789abcdefABCDEF" for c in v):
+                    raise AssertionError(
+                        "section %r stores what looks like byte data in %r; "
+                        "sections must carry a CRC32 of the pre-image, not "
+                        "the pre-image" % (r.get("what", "?"), k))
+        for n in z.namelist():
+            if n.startswith("f/") and z.read(n) in orig:
+                raise AssertionError(
+                    "float blob %s appears verbatim in the cartridge, so it "
+                    "is lifted rather than authored" % n)
+
+    return "%d literal bytes across dist/, none of them the cartridge's" % literals
+
+
+def t_karateka_fixes():
+    """The Karateka fixes: no two disagree unless they are the same knob.
+
+    These are meant to be mixed -- cadence, hit window and control mapping are
+    three different things and a build can have all three. But "different
+    things" is a claim about bytes, and one of these fixes was already
+    withdrawn for being wrong about exactly that. So the claim is checked:
+    every fix's writes are collected, every pair compared, and a pair that
+    disagrees about a byte without being two settings of one knob is a
+    failure.
+
+    It also checks each composite really contains the parts it advertises,
+    because a composite that quietly lost one would still look self-consistent
+    from the inside.
+
+    And it pins the dose rule: doses 2 and 4 must come out byte-identical to
+    fixes 4 and 3, which are the two that were measured on real recorded
+    sessions. If the even-spacing rule ever stops reproducing them, the nine
+    dials are no longer the same instrument those numbers came from.
+    """
+    import importlib.util
+
+    path = os.path.join(os.path.dirname(HERE), "patches", "karateka.py")
+    if not os.path.exists(path):
+        return None
+    spec = importlib.util.spec_from_file_location("karateka_patches", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    # ask the module where the cartridge is rather than re-deriving it:
+    # it searches as well as listing candidates, and a copy of that logic
+    # here would drift and quietly turn this test into a skip
+    try:
+        mod.load_source()
+    except SystemExit:
+        return None
+
+    # check() reports at length; the test wants the verdict, not the report
+    buf, saved = io.StringIO(), sys.stdout
+    try:
+        sys.stdout = buf
+        rc = mod.check()
+    finally:
+        sys.stdout = saved
+    if rc != 0:
+        raise AssertionError(
+            "the fixes conflict; run patches/karateka.py --check for "
+            "which:\n%s" % "\n".join(
+                l for l in buf.getvalue().splitlines() if "CONFLICT" in l))
+
+    _src, _hdr, rom = mod.load_source()
+    for dose, n in ((4, 3), (2, 4)):
+        a = mod.Patcher(rom)
+        mod.fix_input_latch(a)
+        mod._skip_waits(a, mod.dose_indices(dose))
+        b = mod.Patcher(rom)
+        [f for f in mod.FIXES if f["n"] == n][0]["apply"](b)
+        if bytes(a.rom) != bytes(b.rom):
+            raise AssertionError(
+                "dose %d no longer matches fix %d, so the measured frame "
+                "counts do not describe the doses" % (dose, n))
+
+    live = [f for f in mod.FIXES if not f.get("withdrawn")]
+    return ("%d live fixes, no conflicting pair, every composite contains its "
+            "parts, doses 2 and 4 still equal fixes 4 and 3" % len(live))
 
 
 def main():
@@ -1909,6 +2201,12 @@ def main():
     r.check("shipped json", t_json)
     r.check("format files", t_formats)
     r.check("display lists", t_dlwalk)
+    r.check("POKEY random", t_sim_random)
+    r.check("sim compare", t_sim_compare)
+    r.check("sprite import", t_mksprite)
+    r.check("DMA cost model", t_dmabudget)
+    r.check("game scaffold", t_newgame)
+    r.check("gap checker", t_check_gaps)
     r.check("6502 cycle table", t_cycles)
     r.check("example songs", t_examples)
     r.check("note tables", t_notes)
