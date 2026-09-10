@@ -54,6 +54,14 @@ SOURCES = [
 OUTDIR = os.environ.get(
     "KARATEKA_OUT", os.path.join(ROOT, "..", "karateka", "patches"))
 
+# OUTDIR also holds playable .a78 cartridges and the pristine dump, none of
+# which can be published. The .bps and .abp can: a BPS stores a literal only
+# for a run that differs from the source, so every byte in one of these is
+# authored rather than copied, and the patch-set format stores a CRC32 of
+# each pre-image instead of the pre-image. So the distributable half is
+# mirrored into the repository as it is built, and the rest stays out.
+DISTDIR = os.path.join(ROOT, "dist")
+
 
 # Every build gets a fresh cartridge signature before it is written. An NTSC
 # 7800 hashes the cartridge and checks a signature over that hash at
@@ -3662,6 +3670,14 @@ def load_source():
         % (ROM_NAME, "\n    ".join(x for x in SOURCES[1:])))
 
 
+def _publish(path):
+    """Mirror a ROM-free artefact into dist/, where it can be committed."""
+    if not os.path.isdir(DISTDIR):
+        os.makedirs(DISTDIR)
+    io.open(os.path.join(DISTDIR, os.path.basename(path)), "wb").write(
+        io.open(path, "rb").read())
+
+
 def build(which=None):
     src, header, rom = load_source()
     if not os.path.isdir(OUTDIR):
@@ -3700,6 +3716,7 @@ def build(which=None):
         if rc.returncode != 0:
             print("  BPS failed: %s" % (rc.stdout + rc.stderr).strip()[:200])
             continue
+        _publish(bpsp)
         print("fix %d  %s" % (fix["n"], fix["title"]))
         print("        %d bytes changed" % changed)
         print("        %-34s playable" % os.path.basename(a78p))
@@ -3919,6 +3936,7 @@ def build_doses():
             [sys.executable, os.path.join(ROOT, "tools", "bps.py"), "create",
              plain, binp, os.path.join(OUTDIR, stem + ".bps")],
             capture_output=True, text=True)
+        _publish(os.path.join(OUTDIR, stem + ".bps"))
         same = ""
         if n == 4:
             same = "  (this is fix 3)"
@@ -4411,6 +4429,7 @@ def build_bundle(out_path=None):
     if not os.path.isdir(OUTDIR):
         os.makedirs(OUTDIR)
     patchset.write_bundle(out_path, manifest, files)
+    _publish(out_path)
 
     print("%s" % out_path)
     print("  %d options over %d knobs" % (len(opts),

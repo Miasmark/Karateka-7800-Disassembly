@@ -571,6 +571,104 @@ def t_handler_attributes():
     return "%d scripts, no attribute built from quote-bearing JSON" % checked
 
 
+def t_dist_carries_no_rom():
+    """The published patches must not smuggle the cartridge out with them.
+
+    `dist/` is the one directory in this repository that holds build output,
+    and it holds it because both formats there are meant to travel without
+    the game. That is a claim about bytes, so it is checked rather than
+    believed -- the same standard `recipes carry no payload` holds
+    `portkit.py` to.
+
+    For a BPS the question is what its literals are. The encoder emits a
+    literal only for a run that differs from the source, so in principle
+    every stored byte is the patch author's; this confirms it by decoding
+    each patch and comparing every literal against the original at the same
+    address. One match would mean a byte of the game riding along.
+
+    For the patch set the question is different, because it stores whole
+    blobs. Its sections must describe their pre-image with a CRC32 and never
+    quote it, and its float blobs -- code with no fixed home -- must be
+    authored rather than lifted, so none of them may appear anywhere in the
+    cartridge.
+
+    Skips without a dump, like the other cartridge-dependent checks: with no
+    original to compare against there is nothing to be sure of.
+    """
+    import json
+    import zipfile
+
+    root = os.path.dirname(HERE)
+    dist = os.path.join(root, "dist")
+    if not os.path.isdir(dist):
+        return None
+
+    import importlib.util
+    kp = os.path.join(root, "patches", "karateka.py")
+    if not os.path.exists(kp):
+        return None
+    spec = importlib.util.spec_from_file_location("karateka_dist", kp)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    try:
+        _src, _hdr, orig = mod.load_source()
+    except SystemExit:
+        return None
+
+    sys.path.insert(0, HERE)
+    import bps as bpsmod
+
+    literals = leaked = 0
+    for name in sorted(os.listdir(dist)):
+        if not name.endswith(".bps"):
+            continue
+        patch = io.open(os.path.join(dist, name), "rb").read()
+        h = bpsmod.read_header(patch)
+        i, pos = h["actions_at"], 0
+        while i < h["body_end"]:
+            v, i = bpsmod.decode_number(patch, i)
+            act, ln = v & 3, (v >> 2) + 1
+            if act == bpsmod.SOURCE_READ:
+                pos += ln
+            elif act == bpsmod.TARGET_READ:
+                for k in range(ln):
+                    literals += 1
+                    if pos + k < len(orig) and orig[pos + k] == patch[i + k]:
+                        leaked += 1
+                i += ln
+                pos += ln
+            else:
+                _o, i = bpsmod.decode_number(patch, i)
+                pos += ln
+    if leaked:
+        raise AssertionError(
+            "%d of %d literal bytes in dist/*.bps are the original "
+            "cartridge's own; these patches are not safe to publish"
+            % (leaked, literals))
+
+    abp = os.path.join(dist, "karateka.abp")
+    if os.path.exists(abp):
+        z = zipfile.ZipFile(abp)
+        man = json.loads(z.read("patchset.json"))
+        rows = man["sections"]
+        rows = rows if isinstance(rows, list) else list(rows.values())
+        for r in rows:
+            for k, v in r.items():
+                if k != "crc32" and isinstance(v, str) and len(v) >= 8 \
+                        and all(c in "0123456789abcdefABCDEF" for c in v):
+                    raise AssertionError(
+                        "section %r stores what looks like byte data in %r; "
+                        "sections must carry a CRC32 of the pre-image, not "
+                        "the pre-image" % (r.get("what", "?"), k))
+        for n in z.namelist():
+            if n.startswith("f/") and z.read(n) in orig:
+                raise AssertionError(
+                    "float blob %s appears verbatim in the cartridge, so it "
+                    "is lifted rather than authored" % n)
+
+    return "%d literal bytes across dist/, none of them the cartridge's" % literals
+
+
 def t_portkit_refuses_payload():
     """A conversion recipe must carry coordinates, never content.
 
@@ -1828,6 +1926,7 @@ def main():
     r.check("karateka fixes agree", t_karateka_fixes)
     r.check("patch sets", t_patchset)
     r.check("recipes carry no payload", t_portkit_refuses_payload)
+    r.check("published patches carry no ROM", t_dist_carries_no_rom)
     r.check("tool --help", t_helps)
     r.check("README tool list", t_readme)
     r.check("doc links", t_links)

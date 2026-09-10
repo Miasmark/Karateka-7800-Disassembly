@@ -3,13 +3,23 @@
 # the README) and the tools will find it.
 *.a78
 *.bin
-*.bps
-*.abp
 *.rom
 *.car
 *.atr
 *.atx
 *.xex
+
+# .bps and .abp are the exception, and deliberately so: both exist to be
+# distributed without carrying the game. Audited rather than assumed --
+# across every .bps here, 18936 stored literal bytes and not one of them
+# equal to the original at the same address, because the encoder only
+# emits a literal for a run that differs. The .abp is stronger still: its
+# sections store a CRC32 of the pre-image instead of the pre-image, and
+# its float blobs are authored code that appears nowhere in the ROM.
+# Re-run tools/selftest.py, which checks that guarantee, before relaxing
+# anything else here.
+!dist/*.bps
+!dist/*.abp
 
 # ...nor anything decoded out of one. `assets/` holds sprite sheets
 # rendered straight from cartridge graphics and `snap/` holds emulator

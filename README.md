@@ -33,6 +33,41 @@ The tools also look for it beside the toolkit and a few levels down from
 the parent directory, so a normal library layout usually needs no
 configuration at all.
 
+## The patches are in `dist/`
+
+Fifty BPS patches and one `.abp` bundle, and they are there because both
+formats exist to travel without the game. Apply one to your own dump:
+
+```
+python tools/bps.py apply karateka.bin dist/karateka-45-tweak.bps out.bin
+```
+
+`karateka-45-tweak` is the one to start with -- faster reactions, knockback
+that spends the hall's own travel budget, remapped controls, a working
+difficulty switch, and the stance check the port left out of its ending.
+`-46-` and `-47-` are the same with a longer walking step.
+
+The bundle is the pick-and-mix version, which refuses a selection that
+cannot mean one thing rather than resolving it by file order:
+
+```
+python tools/patchset.py list dist/karateka.abp
+python tools/patchset.py apply dist/karateka.abp --rom karateka.bin        --with knockback-light,remap --out out.bin
+```
+
+Either way the result comes out with a valid NTSC cartridge signature, so
+it boots on real hardware and not just in an emulator -- see
+`tools/sign7800.py` for why that is not automatic.
+
+**None of these carries a byte of the game**, and that is checked rather
+than asserted: `selftest.py` decodes every published patch and compares
+each stored literal against the original at the same address, requiring
+zero matches, and confirms the bundle's sections describe their pre-image
+with a CRC32 instead of quoting it. A BPS emits a literal only for a run
+that differs, so every stored byte is authored; across `dist/` that is
+17,462 literals and no match. The check has a negative control: plant one
+cartridge byte in a patch and re-seal it, and it fires.
+
 ## Start here
 
 ```
