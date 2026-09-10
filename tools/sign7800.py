@@ -3,7 +3,7 @@
 ## Why this exists at all
 
 An NTSC 7800 checks a digital signature in the cartridge before it will
-start the console in 7800 mode. If the check fails it falls back to 2600
+start the console in 7800 mode. If the check fails it starts up in 2600
 mode, so a modified cartridge does not refuse to run -- it runs as the
 wrong machine, which on real hardware looks like a black or garbage
 screen rather than an error. PAL consoles have no crypto check at all, and
@@ -11,6 +11,18 @@ neither MAME nor the a7800 fork verifies anything. That combination is
 why a patch project can go a long way without noticing: every build works
 everywhere it is tested and none of them would boot on the console the
 game was sold for.
+
+**This is an NTSC concern only, and the cartridges prove it.** Retail PAL
+dumps of both Karateka and Midnight Mutants carry `$FF` across the whole
+of `$FF80`-`$FFF7`: not a signature that fails, but unprogrammed EPROM
+where a signature would go. Atari never signed the European releases
+because nothing over there was going to look. So a PAL build needs no
+signing, and signing one is harmless but pointless -- it writes 120 bytes
+over filler that nothing reads, and changes the dump's CRC for no gain.
+
+`region()` reads the `.a78` header's TV byte to tell them apart, and the
+CLI skips a cartridge it knows is PAL. A headerless image carries no
+region, so there it does what it is told.
 
 Every byte of a patch is inside the hashed range for most cartridges, so
 this is not about avoiding the signature block -- it is about recomputing
@@ -53,6 +65,7 @@ which did before this module was wired into the build.
 
     python tools/sign7800.py FILE...          report each file's status
     python tools/sign7800.py --write FILE...  sign in place
+    python tools/sign7800.py --write --force FILE...   PAL included
 
 or from Python, on an image rather than a file::
 
@@ -184,6 +197,27 @@ def cart_hash(rom):
 
 
 # ------------------------------------------------------------------- verify
+def unsigned(rom):
+    """True when the signature block was never programmed.
+
+    All `$FF` is an erased EPROM, not a signature that happens to be
+    wrong, and the difference matters when reporting: a PAL cartridge is
+    not broken, it was simply never signed. Every retail PAL dump checked
+    looks like this."""
+    cart = _expand(rom)
+    return set(cart[0xFF80:0xFF80 + SIGLEN]) in ({0xFF}, {0x00})
+
+
+def region(blob):
+    """'pal', 'ntsc' or None, from the .a78 header's TV byte.
+
+    Byte 57 of the 128-byte header is 0 for NTSC and 1 for PAL. A
+    headerless image says nothing, and gets None."""
+    if len(blob) % 0x1000 != HDR:
+        return None
+    return "pal" if blob[57] == 1 else "ntsc"
+
+
 def verify(rom):
     """Does this image carry a signature the console would accept?"""
     cart = _expand(rom)
@@ -276,11 +310,13 @@ def _load(path):
 
 
 def main(argv):
-    write = False
+    write = force = False
     paths = []
     for a in argv:
         if a in ("-w", "--write"):
             write = True
+        elif a == "--force":
+            force = True                # sign a PAL cartridge anyway
         elif a in ("-h", "--help"):
             print(__doc__)
             return 0
@@ -294,6 +330,11 @@ def main(argv):
     for path in paths:
         rom, hdr = _load(path)
         name = os.path.basename(path)
+        where = region(hdr + rom)
+        if where == "pal" and not force:
+            print("%-46s PAL -- no signature needed%s"
+                  % (name, "" if unsigned(rom) else ", and it carries one"))
+            continue
         bad = header_ok(rom)
         if bad:
             print("%-46s CANNOT SIGN: %s" % (name, "; ".join(bad)))
@@ -303,8 +344,10 @@ def main(argv):
             print("%-46s valid" % name)
             continue
         if not write:
-            print("%-46s INVALID -- would boot a real NTSC 7800 in 2600 mode"
-                  % name)
+            print("%-46s %s" % (name, (
+                "never signed -- fine on PAL, boots a real NTSC 7800 in "
+                "2600 mode" if unsigned(rom) else
+                "INVALID -- would boot a real NTSC 7800 in 2600 mode")))
             rc = 1
             continue
         out = signed(rom)

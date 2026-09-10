@@ -1067,6 +1067,80 @@ the one that cannot be precomputed -- the signature covers the whole
 image, so every combination of options has a different one -- and
 `patchset.py apply` computes it at apply time and says so.
 
+## The PAL release is the same game in a different box
+
+Worth settling because it looks alarming from the outside: the PAL
+cartridge is **64K against NTSC's 48K**, and its `.a78` header declares
+cart type `$0012` -- bankswitched -- where NTSC declares `$0000`, linear.
+Compared naively, top-48K against 48K, only 35.5% of the bytes match.
+
+That comparison is wrong, and the truth is much simpler. PAL is the same
+image cut into four 16K banks, and the banks land in a different order:
+
+| NTSC | PAL bank | identical |
+|---|---|---|
+| `$4000`-`$7FFF` | bank 2 | 99.3% |
+| `$8000`-`$BFFF` | bank 0 | 60.9% |
+| `$C000`-`$FFFF` | bank 3 | 99.3% |
+| -- | bank 1 | 96.9% `$FF` filler, a 64K part not filled |
+
+In-bank offsets are unchanged, which is why every landmark is findable at
+a constant displacement: `FETCH` at `$5252`, the store at `$5282`, the
+display-list updater at `$673C`, the walking-stance death at `$6932`, the
+phase dispatcher at `$92E0` -- all present, all at the same offset within
+their bank.
+
+And the 60.9% bank is not what it looks like either. Broken down by what
+lives where, **every byte of game logic is identical**:
+
+| region | differs |
+|---|---|
+| `$8000`-`$8FFF` graphics | 0 of 4096 |
+| `$9000`-`$92FF` satellites | 0 of 768 |
+| `$9300`-`$97FF` phase machines | 0 of 1280 |
+| `$9800`-`$9FFF` room words | 0 of 2048 |
+| `$A000`-`$A5FF` stages and the main loop | 0 of 1536 |
+| `$A700`-`$BFFF` free space | 6400 of 6656 |
+
+The whole of that bank's disagreement is the free-space pool, and it is
+not code at all: **NTSC pads it with `$00` and PAL pads it with `$FF`.**
+
+So the entire difference between the two releases is:
+
+| what | bytes |
+|---|---|
+| free-space fill, `$00` vs `$FF` | 6400 |
+| the signature block at `$FF80`-`$FFF7` | 119 |
+| the NMI handler around `$58EA`-`$5956` | 94 |
+| boot code at `$41B4`-`$41C0` | 12 |
+| `$4063`, `SEI` to `CLI` | 1 |
+
+The 94 bytes in the NMI handler are the retime -- 50 Hz instead of 60 --
+and they sit exactly where this file already says the NMI's five-phase
+background-colour machine lives. Nothing else in the game was touched for
+Europe.
+
+**Everything in this document therefore applies to the PAL release as
+well.** The odometer, the walkers, the stage ring, the bird's exemptions,
+the audio driver and its twelve cues, the ending and the stance rule: all
+the same bytes. Porting a fix means remapping its address to the right
+bank, not re-deriving anything.
+
+### Two things that would break a fix ported carelessly
+
+**Free space is `$FF` on PAL, not `$00`.** Every patch in `karateka.py`
+that claims room does it with `expect=[0x00] * n`, and every float in the
+`.abp` searches with `"fill": 0`. Both would fail on a PAL cartridge --
+the first loudly, which is right, and the second by reporting no room.
+A PAL build wants those changed to `$FF`, not merely re-addressed.
+
+**PAL needs no signature.** The block at `$FF80`-`$FFF7` in the retail PAL
+dump is `$FF` end to end: not a signature that fails, but unprogrammed
+EPROM where a signature would go. Atari never signed the European
+releases because no European console looks. `sign7800.py` now reads the
+`.a78` header's TV byte and skips a cartridge it knows is PAL, and tells
+an unsigned block apart from a wrong one when it reports.
+
 ## What is still dark
 
 **Slots 1, 3 and 9.** Characterised by what they read and not by what they are
