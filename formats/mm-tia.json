@@ -1,0 +1,112 @@
+{
+  "name": "Midnight Mutants -- TIA music player",
+  "note": [
+    "A worked example of a player description. The layout was established by",
+    "reading the player at f6:$752C-$7733; audiotrace.py finds the tables, and",
+    "this says what their bytes mean.",
+    "",
+    "Four levels: a song names two track pointers, a track is a list of",
+    "pattern pointers, a pattern is a count and that many notes, and a note",
+    "packs an instrument, a duration index, a waveform and a pitch into two",
+    "bytes. AUDF is five bits, so the top three of the pitch byte are the",
+    "waveform -- the chip discards them and the player reuses them."
+  ],
+
+  "chip": "tia",
+  "voices": 2,
+
+  "_match": [
+    "How a tool recognises that this file describes a given cartridge.",
+    "",
+    "`player` is the preferred key: a fingerprint of the code that writes to",
+    "the sound chip, from `audiotrace.py --signature`. A format file describes",
+    "an *engine*, and the engine is what recurs -- this one signature covers 53",
+    "images including every hack and rebuild, which a title match misses.",
+    "",
+    "`title` (substring of the header title) and `size` (ROM bytes) still work",
+    "and are checked when present. Omit the block entirely and the file is only",
+    "used when named with --format."
+  ],
+  "match": { "player": "7e91de9d794b" },
+
+  "songs": {
+    "table": "f6:7F65",
+    "count": 12,
+    "stride": 4,
+    "voice_ptr": [0, 2],
+    "banks": {
+      "0": 3, "3": 0, "4": 3, "5": 5, "6": 3
+    },
+    "_banks": [
+      "Track pointers in $8000-$BFFF resolve against whichever bank was mapped",
+      "when the song started, so a song is identified by (number, bank). Songs",
+      "not listed keep their tracks in the fixed bank and play the same",
+      "wherever they are started from."
+    ]
+  },
+
+  "track": {
+    "kind": "ptr_list",
+    "width": 2,
+    "endian": "little",
+    "end_when": "high_byte_zero",
+    "keep_terminator": true,
+    "limit": 64
+  },
+
+  "pattern": {
+    "kind": "count_prefixed",
+    "count_width": 1,
+    "record": 2,
+    "limit": 128
+  },
+
+  "note": {
+    "fields": {
+      "instrument": [0, 4, 4],
+      "duration":   [0, 0, 4],
+      "waveform":   [1, 5, 3],
+      "pitch":      [1, 0, 5]
+    },
+    "_fields": "name: [byte, lowest bit, width]",
+    "rest_when": "byte1 == 0"
+  },
+
+  "durations": {
+    "table": "f6:7734",
+    "width": 1,
+    "count": 16
+  },
+
+  "waveforms": {
+    "table": "f6:76F6",
+    "count": 8,
+    "_note": [
+      "The note's `waveform` field is an index into this, not an AUDC value.",
+      "AUDF is five bits; the player writes the whole byte and then shifts it",
+      "right by five to pick the AUDC from here. One byte, two jobs, and the",
+      "register width is what separates them."
+    ]
+  },
+
+  "instruments": {
+    "table": "f6:7744",
+    "stride": 16,
+    "count": 16,
+    "engine": "adsr5",
+    "fields": {
+      "flags": 0, "counter": 1, "peak": 2, "attack": 3, "decay_len": 4,
+      "sustain": 5, "decay": 6, "sustain_len": 7, "release_len": 8,
+      "release": 9
+    },
+    "_engine": [
+      "`adsr5` is the five-stage envelope this player runs: attack, decay,",
+      "sustain, release, off. Volume is an 8-bit accumulator whose HIGH nibble",
+      "is written to the 4-bit AUDV, which is where the sub-step ramps come",
+      "from. Stage 2 (sustain) writes no volume at all -- that is why a sound",
+      "effect can leave a hole in the music.",
+      "",
+      "Only ten of the sixteen bytes in a row are read."
+    ]
+  }
+}

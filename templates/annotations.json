@@ -1,0 +1,43 @@
+{
+  "_README": [
+    "Every human judgement about the ROM lives in this file; the generated",
+    "listings are disposable. Locations are written 'space:$addr' -- 'f6:$4A92',",
+    "'b3:$8000', or 'rom:$F100' for an unbanked cart. Run tools/survey.py to see",
+    "what spaces your cartridge has.",
+    "",
+    "Delete these _README keys or leave them; the tools ignore unknown keys."
+  ],
+
+  "_entries": "Extra places to start tracing: jump-table targets, handlers the tracer cannot reach on its own. Add one whenever a JMP ($nnnn) or a computed jump leaves a hole.",
+  "entries": [],
+
+  "_ram_vectors": "Pairs of RAM addresses [low, high] holding a jump vector the hardware or the game calls through. The display-interrupt slot is the classic one. Without this, handlers reached only through a RAM vector never get traced and stay as .byte forever.",
+  "ram_vectors": [],
+
+  "_bankat": "Bank switches the tracer could not resolve, because the value written was not a tracked constant. Key is the location of the switch, value is the bank number it selects.",
+  "bankat": {},
+
+  "_labels": "Names. Use them the moment you know what something is; renaming is free because regenerating is free.",
+  "labels": {},
+
+  "_ram": "Names for RAM addresses, keyed by hex address without a space prefix.",
+  "ram": {},
+
+  "_comments": "End-of-line comments, keyed by location.",
+  "comments": {},
+
+  "_headers": "Block comments printed above a line. Good for explaining a routine's contract.",
+  "headers": {},
+
+  "_blocks": "Byte ranges to force as data rather than code, and to describe. Each entry takes 'loc' plus either 'end' or 'len', and may carry a 'note'.",
+  "_blocks": [
+    "A run that is data, not code. Add \"gfx\": true to draw each byte's bits",
+    "beside it instead of listing hex -- reading sprite data as a picture is",
+    "not the same work as reading it as numbers. \"wide\": true puts two bytes",
+    "on a line, which is what a 16-pixel 7800 sprite is."
+  ],
+  "blocks": [],
+
+  "_notes": "Free-form notes attached to a space, printed in its listing header.",
+  "notes": {}
+}

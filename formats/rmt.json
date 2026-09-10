@@ -1,0 +1,25 @@
+{
+  "name": "Raster Music Tracker module",
+  "note": [
+    "RMT is the Atari 8-bit POKEY tracker, and its modules turn up embedded in",
+    "7800 cartridges: 84 images across 41 titles in the library carry one.",
+    "",
+    "This describes how to FIND and READ one, not how to play it. A module",
+    "carries its own magic -- \"RMT\" then '4' or '8' for the channel count --",
+    "so it is matched on that rather than on a player fingerprint. That matters:",
+    "the same module format sits behind several different player builds, and",
+    "keying on the player would split one format across several descriptions",
+    "and miss games that embed a module with no recognisable player at all.",
+    "",
+    "Rendering is deliberately not attempted. RMT's sound comes from its",
+    "instrument engine -- per-instrument envelope tables for volume, distortion",
+    "and pitch, plus effects -- so the note list alone is not the tune. Getting",
+    "it right means reimplementing the replayer; getting it wrong means a song",
+    "that looks right and plays wrong. Record one with tracker.py capture."
+  ],
+
+  "reader": "rmt",
+  "chip": "pokey",
+
+  "match": { "magic": "RMT" }
+}

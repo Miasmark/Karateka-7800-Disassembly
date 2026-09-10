@@ -1,0 +1,46 @@
+{
+  "name": "AtariAge POKEY demos -- parallel-stream player",
+  "note": [
+    "The player behind 58 images in the library and 27 different titles --",
+    "Arkanoid, Donkey Kong, the Mario Bros sound demos, the AtariAge jingle.",
+    "Found by fingerprinting every cartridge's audio-write code and looking",
+    "for what recurs, rather than by picking a game and reading it.",
+    "",
+    "Four voices, each with two parallel byte streams: one pitch and one",
+    "duration per note, in separate arrays, read through pointers that advance",
+    "together. A zero in the duration stream ends the part. Nothing is packed",
+    "into bitfields, and there are no patterns -- it is a flat list per voice.",
+    "",
+    "The envelope is a linear decay of the whole AUDC byte. POKEY keeps volume",
+    "in the low nibble, so subtracting one from the byte fades the note; how",
+    "often comes from a table indexed by the note's own duration, which makes",
+    "long notes fade slowly and short ones fast."
+  ],
+
+  "reader": "parallel",
+  "chip": "pokey",
+  "voices": 4,
+
+  "_voices_at": [
+    "Five parallel tables, one entry per voice: the AUDC the voice starts a",
+    "note at, and the low and high bytes of its two stream pointers.",
+    "Addresses are for the 16K images, which are all of them."
+  ],
+  "voices_at": {
+    "audc":     "rom:C283",
+    "pitch_hi": "rom:C2F3",
+    "pitch_lo": "rom:C303",
+    "dur_hi":   "rom:C313",
+    "dur_lo":   "rom:C323"
+  },
+
+  "_decay": [
+    "Frames between one decrement of AUDC and the next, indexed by the note's",
+    "duration. Entry 0 is unused because a duration of zero ends the part."
+  ],
+  "decay": { "table": "rom:C2B3", "count": 64 },
+
+  "limit": 256,
+
+  "match": { "player": "5f0099c74376" }
+}

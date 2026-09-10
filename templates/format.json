@@ -1,0 +1,159 @@
+{
+  "_README": [
+    "A player-format description for songfmt.py. Copy this, fill it in for your",
+    "game, and delete the underscore keys -- they are documentation and are",
+    "ignored. `formats/mm-tia.json` is the same file filled in for a real game.",
+    "",
+    "The tool knows nothing about any particular player. Everything specific to",
+    "a game lives here, which means writing this file IS the reverse",
+    "engineering. The way to do it:",
+    "",
+    "  1. `audiotrace.py game.a78` -- finds the audio writes and the tables",
+    "     feeding them. That gives you addresses, not meaning.",
+    "  2. Disassemble the routine it points at and read how a note is decoded.",
+    "  3. Fill this in, `songfmt.py pull`, then `songfmt.py render --verify`",
+    "     against a capture of the same song. Anything less than 100% means",
+    "     your reading is wrong somewhere -- which is the point of the check.",
+    "",
+    "An address is written `space:hex`, e.g. `f6:7F65` or `b3:8C3A`, using the",
+    "space names the disassembler uses for this cartridge."
+  ],
+
+  "name": "Some Game -- TIA music player",
+  "chip": "tia",
+  "voices": 2,
+
+  "_match": [
+    "Optional. Lets a tool find this file for a cartridge on its own, instead",
+    "of being told with --format. Leave it out while you are still working the",
+    "format out.",
+    "",
+    "`player` is the key to prefer: the fingerprint from",
+    "`audiotrace.py game.a78 --signature`, which hashes the code around the",
+    "cartridge's audio writes. A format file describes an ENGINE, and the",
+    "engine is what recurs -- across the library, 40 fingerprints span more",
+    "than one game and cover 373 images. Matching on a title finds one game;",
+    "matching on the player finds every cartridge built on it.",
+    "",
+    "`title` (substring of the header title) and `size` (ROM bytes) are also",
+    "checked when present, and are worth adding if a fingerprint turns out to",
+    "be shared by games whose tables are in different places.",
+    "",
+    "A fingerprint says *same engine*, not *same addresses*. A tool that",
+    "matches on it and then fails to read should fall back, not stop."
+  ],
+  "match": { "player": "0123456789ab" },
+  "_voices": "how many channels the player drives; voice N is channel N",
+
+  "_songs": [
+    "The top-level table: `count` songs, `stride` bytes apart, each holding a",
+    "pointer to a track per voice at the offsets in `voice_ptr`.",
+    "",
+    "`banks` matters on a banked cartridge. A pointer into the paged window is",
+    "read against whatever bank was mapped when the song started, so the same",
+    "address is two different tunes depending on where it was started from.",
+    "Map song number -> bank for any song whose data is not in a fixed bank.",
+    "Getting this wrong is silent: you get a plausible song from the wrong",
+    "bytes -- so it is left empty here rather than half-filled. On a linear",
+    "cartridge, leave it empty for real."
+  ],
+  "songs": {
+    "table": "f6:7F65",
+    "count": 12,
+    "stride": 4,
+    "voice_ptr": [0, 2],
+    "banks": {}
+  },
+
+  "_track": [
+    "A track is the arrangement: a list of pattern pointers, repeats included.",
+    "`end_when` says how the list stops -- `high_byte_zero` means a pointer",
+    "whose high byte is 0 ends it, and the low byte is then a command",
+    "(loop, stop, chain), kept as `terminator` when `keep_terminator` is set.",
+    "`limit` is a safety stop, not a format fact."
+  ],
+  "track": {
+    "kind": "ptr_list",
+    "width": 2,
+    "endian": "little",
+    "end_when": "high_byte_zero",
+    "keep_terminator": true,
+    "limit": 64
+  },
+
+  "_pattern": [
+    "`count_prefixed`: one count byte, then that many fixed-size records.",
+    "A pattern owns exactly the bytes it occupies, and songfmt will refuse to",
+    "grow one, because whatever follows it belongs to something else."
+  ],
+  "pattern": {
+    "kind": "count_prefixed",
+    "count_width": 1,
+    "record": 2,
+    "limit": 128
+  },
+
+  "_note": [
+    "How one record unpacks. Each field is [byte index, lowest bit, width], so",
+    "a field can straddle nothing but sits anywhere inside its byte.",
+    "",
+    "Expect fields to share a byte in ways that look wrong until you see why:",
+    "a 5-bit AUDF leaves three bits spare in the pitch byte, and players reuse",
+    "them. `rest_when` is the test for a silent note."
+  ],
+  "note": {
+    "fields": {
+      "instrument": [0, 4, 4],
+      "duration":   [0, 0, 4],
+      "waveform":   [1, 5, 3],
+      "pitch":      [1, 0, 5]
+    },
+    "rest_when": "byte1 == 0"
+  },
+
+  "_durations": [
+    "The note's `duration` field indexes this table, giving a length in frames",
+    "(one row per frame at 60 Hz NTSC, 50 Hz PAL). Omit if durations are",
+    "literal frame counts."
+  ],
+  "durations": { "table": "f6:7734", "width": 1, "count": 16 },
+
+  "_waveforms": [
+    "Optional. If the note's `waveform` field is an INDEX into a table rather",
+    "than an AUDC value, describe the table here. Without it, songfmt treats",
+    "the field as the register value directly."
+  ],
+  "waveforms": { "table": "f6:76F6", "count": 8 },
+
+  "_instruments": [
+    "Optional, and needed only for `songfmt.py render`. Volume over time is a",
+    "program, not a layout, so it is not described declaratively: name an",
+    "`engine` that songfmt implements and give the byte offsets its rows use.",
+    "An engine songfmt does not implement is refused rather than approximated,",
+    "because a song rendered with the wrong envelope sounds convincing and is",
+    "wrong.",
+    "",
+    "Implemented engines:",
+    "",
+    "  adsr5 -- five stages (attack, decay, sustain, release, off), one step",
+    "           per frame. Volume is an 8-bit accumulator whose high nibble",
+    "           reaches a 4-bit volume register, so decrements smaller than $10",
+    "           are slopes. The sustain stage writes no volume at all. Needs",
+    "           these `fields`: flags, counter, peak, attack, decay_len,",
+    "           sustain, decay, sustain_len, release_len, release.",
+    "",
+    "If your player's envelope is not one of these, leave this out: pull and",
+    "push still work, and only `render` is unavailable."
+  ],
+  "instruments": {
+    "table": "f6:7744",
+    "stride": 16,
+    "count": 16,
+    "engine": "adsr5",
+    "fields": {
+      "flags": 0, "counter": 1, "peak": 2, "attack": 3, "decay_len": 4,
+      "sustain": 5, "decay": 6, "sustain_len": 7, "release_len": 8,
+      "release": 9
+    }
+  }
+}

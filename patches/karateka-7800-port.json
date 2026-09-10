@@ -1,0 +1,116 @@
+{
+  "name": "Karateka 7800 -- conversion recipe",
+  "what": "a build recipe, not a copy: it says where each piece comes from",
+  "_how_to_use": [
+    "python tools/portkit.py verify patches/karateka-7800-port.json",
+    "",
+    "You supply your own disk image and cartridge. Nothing copyrighted is",
+    "in this file -- only hashes, offsets and lengths."
+  ],
+  "sources": {
+    "a8disk": {
+      "what": "Karateka, Atari 8-bit, as an ATX disk image",
+      "sha256": "bf67724a7c0010f5d2327a50a718e141d93312bbb5953c7f7d035a3c2495abe2",
+      "look_in": [
+        "../../karateka/karateka.atx"
+      ]
+    },
+    "cart7800": {
+      "what": "Karateka (NTSC) 7800 cartridge, for comparison and for anything reused from it",
+      "sha256": "d45661f5c4c63f9a9623f8449f0dd1b4f993f47eba938a554d56887e43872616",
+      "look_in": [
+        "../../Rom Library/Trebors 7800 ROM PROPack v8_17/Retail_v7_0/NTSC/Karateka (NTSC) (Atari) (1987) (FEC21472).a78"
+      ]
+    },
+    "xegs": {
+      "what": "Karateka, Atari XEGS 128K cartridge (.car, type 14)",
+      "sha256": "484b3264cba11f042d2990610d5109b9e4195db78f5b8e401b30b8dfbc88cb1c",
+      "look_in": [
+        "../../karateka/Karateka.car"
+      ],
+      "note": "the 16-byte CART header is included in this hash; regions are measured from the start of the ROM, after it"
+    }
+  },
+  "regions": {
+    "boot-loader": {
+      "from": "a8disk",
+      "sector": 1,
+      "sectors": 1,
+      "sha256": "2ea499bc009cc7705bfd7b0e7aeed149b3acf7d29db18ca70680479c821a2145",
+      "what": "the boot record and first-stage loader"
+    },
+    "stage-two": {
+      "from": "a8disk",
+      "sector": 91,
+      "sectors": 1,
+      "sha256": "4d21dc537d04d6f6db5941737f979d18b80a7c924b878bec3fd0523f77218c7d",
+      "what": "the second-stage loader, self-decrypting"
+    },
+    "art-201": {
+      "from": "a8disk",
+      "sector": 201,
+      "sectors": 13,
+      "sha256": "ced438aa414eb856a6dee49faabaa9024d6632c78a16f0a9fcd8fa72a0b74f85",
+      "what": "sparse sectors; row correlation says 6 bytes/row"
+    },
+    "art-254": {
+      "from": "a8disk",
+      "sector": 254,
+      "sectors": 4,
+      "sha256": "dae4598f95667a12edd14e4686f44897c9ff50d0123dd140eaa8f6178c742982",
+      "what": "sparse sectors; strongest structure at 12/row"
+    },
+    "art-290": {
+      "from": "a8disk",
+      "sector": 290,
+      "sectors": 22,
+      "sha256": "150c655146a0089d1fc291caf3a2145e026f93add948a1c258c4abb28a555336",
+      "what": "sparse sectors; 20 bytes/row"
+    },
+    "art-0BE00": {
+      "from": "xegs",
+      "offset": 48640,
+      "length": 2048,
+      "sha256": "65d7b903f6ccd89bcfb81558f8167a61a55c8baa7f1c735612189da4aac09151",
+      "what": "strongest picture structure in the image, 20 bytes/row"
+    },
+    "art-03E00": {
+      "from": "xegs",
+      "offset": 15872,
+      "length": 4096,
+      "sha256": "1c4bc2b45afafc700eee3c171fa09d5822532efb90e499fa02815c4d87899e1a",
+      "what": "10 bytes/row"
+    },
+    "art-08400": {
+      "from": "xegs",
+      "offset": 33792,
+      "length": 2560,
+      "sha256": "643cb727bd31544b518affab7e4fa72741af41f5018d751a76d3ecea7319dee1",
+      "what": "5 bytes/row"
+    },
+    "art-1AA00": {
+      "from": "xegs",
+      "offset": 109056,
+      "length": 3584,
+      "sha256": "169a71583de7041fd7aa60fed3160217eadf9f7dbc13b05bda23956d715b642b",
+      "what": "4 bytes/row"
+    }
+  },
+  "new": [],
+  "_new": "original files that ship with the recipe, because they are ours",
+  "_output": "the sha256 the finished cartridge must have, once there is one",
+  "_look_in": "paths are relative to this file, so a recipe in patches/ reaches the disk with ../../",
+  "_source_choice": [
+    "The XEGS cartridge is the source, not the disk, and the numbers say why:",
+    "  packed/encrypted blocks   disk 10%   cart 1%",
+    "  directly readable         disk 76%   cart 91%",
+    "  POKEY accesses visible    disk 19    cart 64",
+    "  OS ROM dependencies       disk 11    cart 2",
+    "  copy protection           yes        none",
+    "",
+    "A cartridge has no loader, no decryptor and no disk I/O, so more of the",
+    "game is visible and less of it needs replacing. The disk stays listed",
+    "because it is the same game and useful for cross-checking."
+  ],
+  "_region_offsets": "offsets in 'xegs' regions are into the ROM, i.e. the file minus its 16-byte CART header"
+}

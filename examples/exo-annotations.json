@@ -1,0 +1,32 @@
+{
+  "_note": "E X O (RC Demo A), 512K / 32 banks. Worked out with the toolkit.",
+
+  "_trampoline": [
+    "Inter-bank calls go through f31:$FC0F. The caller pushes a synthetic",
+    "return frame, loads the target bank into A, and JMPs there; the",
+    "trampoline does STA $8000 to switch, restores X, and RTSes into the",
+    "newly-banked code. A recursive-descent tracer cannot follow that: the",
+    "destination only exists on the stack, which it does not model. Each such",
+    "landing site therefore has to be declared here by hand.",
+    "",
+    "f31:$FC16 is the matching return path -- it pulls the caller's bank back",
+    "off the stack, so it restores rather than selects."
+  ],
+  "entries": ["b24:$98F2"],
+  "banksw": { "f31:$FC17": "keep" },
+
+  "labels": {
+    "f31:$FC0F": "SwitchBankAndReturn",
+    "f31:$FC16": "RestoreBankAndReturn"
+  },
+  "headers": {
+    "f31:$FC0F": "Bank trampoline. A = target bank; the caller has already\npushed the return address the RTS below will use.",
+    "f31:$FC16": "The way back: the caller's bank was pushed, so pull and restore it."
+  },
+  "ram_vectors": [],
+  "comments": {},
+  "ram": {},
+  "blocks": [],
+  "bankat": {},
+  "notes": {}
+}

@@ -1,0 +1,158 @@
+{
+  "name": "Commando -- POKEY music player",
+
+  "note": [
+    "The same engine as Midnight Mutants, on a different chip.",
+    "",
+    "That is not a guess from the sound of it. The two players lay their",
+    "tables out in the same order and the same shapes: a 16-entry duration",
+    "table, then 16 instrument records of 16 bytes each with only the first",
+    "ten used, then pointer lists ended by an entry whose high byte is zero,",
+    "then count-prefixed patterns of fixed-size notes. Midnight Mutants keeps",
+    "its durations at f6:$7734 and its instruments at f6:$7744, sixteen bytes",
+    "apart; Commando keeps them at b6:$A941 and b6:$A951, sixteen bytes apart.",
+    "Atari-era houses shared their sound code, and this is what that looks",
+    "like from the ROM side.",
+    "",
+    "Checked against the machine, not just against itself. A 45-second",
+    "capture of the cartridge running in the emulator matches song 0 on",
+    "576 of 576 frames across all four voices -- every AUDC, AUDF and",
+    "volume, every frame. Song 1 follows it in the same capture and matches",
+    "94 of its 96 frames; the last two are the player cutting the final note",
+    "short to start what comes next, which is sequencing above the level a",
+    "song describes. A no-op push of all 43 patterns changes zero bytes.",
+    "",
+    "What differs is forced by the chip. TIA's AUDF is five bits, so Midnight",
+    "Mutants has three bits spare in the pitch byte and spends them on an",
+    "index into a waveform table. POKEY's AUDF is the whole byte, so there is",
+    "no room, and the control value comes from the instrument instead --",
+    "`audc_from: instrument` selects that. Same idea, different budget."
+  ],
+
+  "chip": "pokey",
+  "voices": 4,
+
+  "match": { "player": "3355254957d7" },
+
+  "audc_from": "instrument",
+  "_audc_from": [
+    "Where a note's AUDC comes from. `instrument` takes it from the high",
+    "nibble of the instrument's first byte, which is also the byte the",
+    "envelope ORs its volume into -- one byte carrying distortion and volume,",
+    "which is exactly POKEY's AUDC register."
+  ],
+
+  "songs": {
+    "table": "b6:B640",
+    "count": 11,
+    "stride": 8,
+    "voice_ptr": [0, 2, 4, 6],
+    "titles": {
+      "0":  "intro, when a game starts",
+      "1":  "death",
+      "2":  "final encounter, in each level",
+      "3":  "victory, when a level is cleared",
+      "4":  "extended victory fanfare, possibly the game-win -- unconfirmed",
+      "5":  "level background",
+      "6":  "level background",
+      "7":  "level background",
+      "8":  "level background",
+      "9":  "title theme",
+      "10": "level background"
+    },
+    "_titles": [
+      "Identified by playing the game and listening -- there is nothing in the",
+      "bytes that says which tune is the title theme, and no analysis recovers",
+      "it. Song 4 is the one guess in the list: it is clearly an extended",
+      "arrangement of song 3's victory theme, and where it plays is unconfirmed.",
+      "",
+      "It is not a remix of song 3 in the literal sense, which is worth saying",
+      "because it sounds like one: the two share no pattern bytes, their",
+      "longest identical run of pitches is four notes, and the seven pitches",
+      "they have in common are simply the key. The resemblance is the same",
+      "instrument palette and the same scale over different music.",
+      "",
+      "The rest were placed by ear against the running cartridge. Songs 5 to 8",
+      "and 10 are background music without a more specific role established."
+    ],
+
+    "banks": {
+      "0": 6, "1": 6, "2": 6, "3": 6, "4": 6, "5": 6,
+      "6": 6, "7": 6, "8": 6, "9": 6, "10": 6
+    },
+    "_banks": [
+      "Every table this player uses -- durations, instruments, tracks and",
+      "patterns -- sits in bank 6, so every song resolves there. Midnight",
+      "Mutants spreads its songs across banks and has to say which; this one",
+      "keeps the whole engine and all its music in one, but the pointers are",
+      "still in the paged window and so the bank still has to be named."
+    ],
+
+    "_voice_ptr": [
+      "Four voices, so four pointers per song. Songs that use fewer leave the",
+      "unused slots zero -- songs 1 and 2 are two-voice and read as such."
+    ]
+  },
+
+  "track": {
+    "kind": "ptr_list",
+    "width": 2,
+    "endian": "little",
+    "end_when": "high_byte_zero",
+    "keep_terminator": true,
+    "limit": 64
+  },
+
+  "pattern": {
+    "kind": "count_prefixed",
+    "count_width": 1,
+    "record": 2,
+    "limit": 255
+  },
+
+  "note": {
+    "fields": {
+      "instrument": [0, 4, 4],
+      "duration":   [0, 0, 4],
+      "pitch":      [1, 0, 8]
+    },
+    "_fields": "name: [byte, lowest bit, width]",
+    "_no_waveform": [
+      "There is no waveform field: the pitch byte is all eight bits of AUDF.",
+      "Confirmed rather than assumed -- pitches across every pattern span",
+      "$00 to $F3, so nothing above bit 4 is free to hold anything else."
+    ],
+    "rest_when": "byte1 == 0"
+  },
+
+  "durations": {
+    "table": "b6:A941",
+    "width": 1,
+    "count": 16,
+    "_note": [
+      "60 48 40 30 24 20 18 12 10 0C 09 08 06 04 03 02 -- frame counts,",
+      "longest first, so the note's duration nibble is an index and not a",
+      "length. It sits immediately before the instruments, as in Midnight",
+      "Mutants."
+    ]
+  },
+
+  "instruments": {
+    "table": "b6:A951",
+    "stride": 16,
+    "count": 16,
+    "engine": "adsr5",
+    "fields": {
+      "flags": 0, "counter": 1, "peak": 2, "attack": 3, "decay_len": 4,
+      "sustain": 5, "decay": 6, "sustain_len": 7, "release_len": 8,
+      "release": 9
+    },
+    "_engine": [
+      "The same five-stage envelope: attack, decay, sustain, release, off,",
+      "with volume as an 8-bit accumulator whose high nibble reaches the",
+      "4-bit volume field. Ten of the sixteen bytes in a row are read, and",
+      "the other six are zero in every row here -- which is itself evidence",
+      "that the record was sized for this engine and not trimmed for POKEY."
+    ]
+  }
+}

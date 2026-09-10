@@ -1,0 +1,110 @@
+{
+  "name": "Fatal Run (NTSC) -- TIA music player",
+  "_about": [
+    "Fatal Run, on the Atari in-house music engine -- the same one",
+    "behind Midnight Mutants and Commando, which share a byte-identical",
+    "duration table with this one. Found by audiotrace.py --engine.",
+    "",
+    "CHECKED AGAINST THE MACHINE, with one caveat worth stating. Pitch and",
+    "waveform of song 0 voice 0 match a 45-second capture on 487 of 487",
+    "frames -- exactly. Including volume the same span scores 85.2%, and that",
+    "gap is not an error here: this engine's sustain stage writes no volume,",
+    "so a sound effect over the music leaves holes in AUDV. Midnight Mutants,",
+    "confirmed long ago, behaves the same against its own capture."
+  ],
+  "chip": "tia",
+  "voices": 2,
+  "match": {
+    "player": "f84067ce4abf"
+  },
+  "songs": {
+    "table": "b4:8C99",
+    "count": 9,
+    "stride": 4,
+    "voice_ptr": [
+      0,
+      2
+    ],
+    "banks": {
+      "0": 4,
+      "1": 4,
+      "2": 4,
+      "3": 4,
+      "4": 4,
+      "5": 4,
+      "6": 4,
+      "7": 4,
+      "8": 4
+    },
+    "_banks": "Which bank each song's track pointers resolve against, worked out by trying each and keeping the one where every voice led to real patterns."
+  },
+  "track": {
+    "kind": "ptr_list",
+    "width": 2,
+    "endian": "little",
+    "end_when": "high_byte_zero",
+    "keep_terminator": true,
+    "limit": 64
+  },
+  "pattern": {
+    "kind": "count_prefixed",
+    "count_width": 1,
+    "record": 2,
+    "limit": 255
+  },
+  "note": {
+    "fields": {
+      "instrument": [
+        0,
+        4,
+        4
+      ],
+      "duration": [
+        0,
+        0,
+        4
+      ],
+      "pitch": [
+        1,
+        0,
+        5
+      ],
+      "waveform": [
+        1,
+        5,
+        3
+      ]
+    },
+    "_fields": "name: [byte, lowest bit, width]",
+    "rest_when": "byte1 == 0"
+  },
+  "durations": {
+    "table": "b4:83C2",
+    "width": 1,
+    "count": 16,
+    "_note": "60 48 40 30 24 20 18 12 10 0C 09 08 06 04 03 02"
+  },
+  "instruments": {
+    "table": "b4:83D2",
+    "stride": 16,
+    "count": 16,
+    "engine": "adsr5",
+    "fields": {
+      "flags": 0,
+      "counter": 1,
+      "peak": 2,
+      "attack": 3,
+      "decay_len": 4,
+      "sustain": 5,
+      "decay": 6,
+      "sustain_len": 7,
+      "release_len": 8,
+      "release": 9
+    }
+  },
+  "waveforms": {
+    "table": "b4:81BD",
+    "count": 8,
+    "_note": "Settled by the capture: the other candidate scores single digits."
+  }
+}

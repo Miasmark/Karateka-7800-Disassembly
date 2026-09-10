@@ -1,0 +1,29 @@
+# Nothing ROM-shaped, ever. This project ships coordinates and code, never
+# cartridge bytes: supply your own dump (see "No ROM ships with this" in
+# the README) and the tools will find it.
+*.a78
+*.bin
+*.bps
+*.abp
+*.rom
+*.car
+*.atr
+*.atx
+*.xex
+
+# ...nor anything decoded out of one. `assets/` holds sprite sheets
+# rendered straight from cartridge graphics and `snap/` holds emulator
+# screenshots; both are game artwork and both regenerate from a dump.
+assets/
+snap/
+
+# Emulator and session leftovers rather than source.
+cfg/
+*.log
+*.inp
+*.wav
+*.lnk
+
+__pycache__/
+*.pyc
+.DS_Store

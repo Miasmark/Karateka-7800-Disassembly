@@ -1,0 +1,94 @@
+{
+  "name": "Meltdown (NTSC) -- TIA music player",
+  "_about": [
+    "Meltdown, on the Atari in-house music engine -- the same one",
+    "behind Midnight Mutants and Commando, which share a byte-identical",
+    "duration table with this one. Found by audiotrace.py --engine.",
+    "",
+    "CHECKED AGAINST THE MACHINE. A 45-second capture matches this description",
+    "on 846 of 846 frames of song 0 voice 1 -- every AUDC, AUDF and volume."
+  ],
+  "chip": "tia",
+  "voices": 2,
+  "match": {
+    "player": "fb7017cccef4"
+  },
+  "songs": {
+    "table": "b7:B81A",
+    "count": 4,
+    "stride": 4,
+    "voice_ptr": [
+      0,
+      2
+    ]
+  },
+  "track": {
+    "kind": "ptr_list",
+    "width": 2,
+    "endian": "little",
+    "end_when": "high_byte_zero",
+    "keep_terminator": true,
+    "limit": 64
+  },
+  "pattern": {
+    "kind": "count_prefixed",
+    "count_width": 1,
+    "record": 2,
+    "limit": 255
+  },
+  "note": {
+    "fields": {
+      "instrument": [
+        0,
+        4,
+        4
+      ],
+      "duration": [
+        0,
+        0,
+        4
+      ],
+      "pitch": [
+        1,
+        0,
+        5
+      ],
+      "waveform": [
+        1,
+        5,
+        3
+      ]
+    },
+    "_fields": "name: [byte, lowest bit, width]",
+    "rest_when": "byte1 == 0"
+  },
+  "durations": {
+    "table": "b7:B3E8",
+    "width": 1,
+    "count": 16,
+    "_note": "60 48 40 30 24 20 18 12 10 0C 09 08 06 04 03 02"
+  },
+  "instruments": {
+    "table": "b7:B3F8",
+    "stride": 16,
+    "count": 16,
+    "engine": "adsr5",
+    "fields": {
+      "flags": 0,
+      "counter": 1,
+      "peak": 2,
+      "attack": 3,
+      "decay_len": 4,
+      "sustain": 5,
+      "decay": 6,
+      "sustain_len": 7,
+      "release_len": 8,
+      "release": 9
+    }
+  },
+  "waveforms": {
+    "table": "b7:B2FC",
+    "count": 8,
+    "_note": "Settled by the capture: the other candidate scores single digits."
+  }
+}

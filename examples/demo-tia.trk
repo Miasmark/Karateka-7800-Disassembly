@@ -1,0 +1,39 @@
+; Two TIA voices, written around the pitches the chip can actually reach.
+;
+;     python tools/tracker.py render examples/demo.trk -o demo.wav
+;     python tools/tracker.py export examples/demo.trk -o demo.asm
+;
+; AUDC $C -- tone, div 6 -- is the usual melody voice, and its dividers land
+; on C, D, E, F#, A and C in this octave. There is no G at all: AUDF 6 gives
+; F#4 and AUDF 5 gives A4, with nothing between them. So this tune is built
+; from the notes that exist rather than from a scale that does not, which is
+; the whole craft of writing for this chip. `tracker.py notes --audc C` lists
+; them, and the tracker warns if you ask for one it has to fake.
+;
+; ch1 answers an octave down and then holds the bass. The last bars are AUDC
+; $8, white noise, which has no pitch -- so its AUDF is written as a raw value.
+title Two voices
+region ntsc
+rate 8
+;   ch0        | ch1
+C C-4 A        | C C-3 6
+C D-4 A        | ...
+C E-4 A        | ...
+C A-4 A        | C C-3 6
+C E-4 A        | ...
+C D-4 A        | ...
+C C-4 A        | C A-2 6
+...            | ...
+C E-4 9        | C C-3 5
+C A-4 9        | ...
+C C-5 9        | C E-3 5
+...            | ...
+C A-4 9        | C A-2 5
+C F#4 9        | ...
+C E-4 A        | C C-3 6
+...            | ...
+C C-4 A        | C C-3 4
+8 $04 6        | ...
+8 $08 4        | C A-2 4
+8 $0C 2        | ...
+off            | off

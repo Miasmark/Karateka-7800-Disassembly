@@ -1,0 +1,29 @@
+; Four POKEY voices. Render with:
+;     python tools/tracker.py render examples/demo-pokey.trk -o pokey.wav
+;
+; The contrast with demo-tia.trk is the point. POKEY's divider is eight bits
+; against the TIA's five, so a plain major scale just works -- no hunting for
+; the notes that happen to exist. Distortion 5 is the pure tone; 0 and 6 are
+; the noise voices, whose AUDF is a raw value because they have no pitch.
+;
+; AUDCTL $00 is the plain 64 kHz clock on all four channels. Every other bit
+; works too: $01 (15 kHz), $20/$40 (1.79 MHz on channels 3 and 1), the 16-bit
+; pairs ($08/$10), the high-pass filters ($02/$04) and the 9-bit polynomial
+; ($80). All of it checked against the chip, distortion by distortion.
+title Four voices
+chip pokey
+region ntsc
+rate 8
+audctl $00
+;  ch1          | ch2          | ch3          | ch4
+5 C-4 A         | 5 E-4 7      | 5 G-4 6      | 5 C-3 8
+5 D-4 A         | ...          | ...          | ...
+5 E-4 A         | 5 G-4 7      | 5 C-5 6      | ...
+5 F-4 A         | ...          | ...          | 5 F-3 8
+5 G-4 A         | 5 B-4 7      | 5 D-5 6      | ...
+5 A-4 A         | ...          | ...          | ...
+5 B-4 A         | 5 D-5 7      | 5 F-5 6      | 5 G-3 8
+5 C-5 A         | ...          | ...          | ...
+off             | off          | off          | 5 C-3 6
+6 $30 8         | 0 $18 6      | off          | ...
+off             | off          | off          | off
