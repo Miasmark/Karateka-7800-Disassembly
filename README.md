@@ -141,6 +141,15 @@ python tools/patchset.py apply dist/karateka.abp --rom karateka.bin \
 Either way the result comes out with a valid NTSC signature, so it boots
 on real hardware and not only in an emulator.
 
+**PAL is supported separately.** `dist/karateka-pal.abp` carries fourteen
+of these plus a `pal-tweak` composite, translated bank-wise from the NTSC
+builds rather than re-derived -- the European release is the same game in
+four banks. The cadence fixes are not in it: they all rest on the input
+latch, whose hook site is inside the 50 Hz retime of the NMI handler,
+which is the one piece of logic Europe rewrote. Built by
+`patches/karateka-pal.py`; needs `KARATEKA_PAL_ROM` pointed at your own
+dump.
+
 To build them yourself from your own dump:
 
 ```

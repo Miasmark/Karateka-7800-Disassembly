@@ -2076,6 +2076,69 @@ and for everyone, while 48 changes nothing by default. The switch decides,
 and A -- where the game has effectively always been, since the test never
 fired -- is the stock window.
 
+### The PAL bundle, and the one thing that blocks half of it
+
+The European release is the same game in four banks -- see "The PAL
+release is the same game in a different box" in `docs/karateka-map.md`.
+In-bank offsets are unchanged, so a fix does not need re-deriving for it;
+its addresses need moving to the right bank, and that is arithmetic:
+
+```
+NTSC $4000-$7FFF  ->  PAL bank 2, file offset + $8000
+NTSC $8000-$BFFF  ->  PAL bank 0, file offset - $4000
+NTSC $C000-$FFFF  ->  PAL bank 3, file offset + $4000
+```
+
+`patches/karateka-pal.py` applies each fix to the NTSC image exactly as
+`karateka.py` builds it and translates the bytes it wrote, so nothing is
+re-implemented and nothing can drift. Every fix is then checked byte by
+byte against the PAL image before being accepted, which sorts them into
+three groups:
+
+| | fixes | |
+|---|---|---|
+| identical | 12 | every byte the fix expects is the byte PAL has |
+| free-space fill | 16 | the only disagreement is `$00` against `$FF` |
+| blocked | 20 | the fix writes over code PAL actually changed |
+
+**All twenty blocked fixes are blocked by one write.** Fix 1's seven-byte
+hook at `$5945` sits inside `$58EA`-`$5956`, the 50 Hz retime of the NMI
+handler and the one piece of logic Europe rewrote:
+
+```
+NTSC $5945   A0 10 88 D0 FD EA EA     the delay loop the latch replaces
+PAL  $5945   01 85 A8 4C 57 59 00     different code entirely
+```
+
+Everything carrying the input latch inherits it: the whole cadence family,
+the remap's decoder half, and the `tweak` builds. Porting those means
+finding where the PAL handler has room for the same hook -- a
+reverse-engineering job on that handler, not a translation -- so it is
+deliberately not guessed at.
+
+`karateka-pal.abp` therefore ships fourteen fixes and a `pal-tweak`
+composite: knockback that spends the hall's travel budget, the control
+remap, the princess's kick, 3-1-1 strikes and a working difficulty switch.
+No cadence work.
+
+**The banking worry turned out to be unfounded, and it was worth
+checking.** On NTSC the free-space pool at `$A6D0`-`$BFFF` is always
+present because the cartridge is linear. On PAL that range is bank 0's
+tail inside a *switched* window, so patch code living there could in
+principle be invisible when the hook fires. Sampled from the CPU's own
+view across 1081 frames of a running PAL cartridge, the fix code at
+`$B300` and `$B402` and the repointed cell at `$A0EA` are mapped in **100%
+of frames** -- bank 0 holds the main loop, so it is resident whenever the
+game is running. The patched cartridge also boots and plays identically to
+stock through the title and intro.
+
+Two smaller notes. PAL cartridges are never signed, so nothing here signs
+one -- `patchset.py` now checks the `.a78` header's TV byte and skips it,
+which it did not before and which had quietly put a pointless signature on
+the first PAL build. And the bundle refuses an NTSC dump outright: the
+body sizes differ, 65536 against 49152, before any anchor is even
+consulted.
+
 ## Ranked
 
 ### 0. Ship what exists -- no effort

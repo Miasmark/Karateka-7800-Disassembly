@@ -2094,8 +2094,11 @@ def t_dist_carries_no_rom():
             "cartridge's own; these patches are not safe to publish"
             % (leaked, literals))
 
-    abp = os.path.join(dist, "karateka.abp")
-    if os.path.exists(abp):
+    # every bundle, not just the NTSC one: the structural guarantee holds
+    # regardless of which cartridge a bundle targets, and a PAL bundle
+    # would otherwise go unchecked
+    for abp in sorted(f for f in os.listdir(dist) if f.endswith(".abp")):
+        abp = os.path.join(dist, abp)
         z = zipfile.ZipFile(abp)
         man = json.loads(z.read("patchset.json"))
         rows = man["sections"]

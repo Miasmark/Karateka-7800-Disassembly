@@ -810,6 +810,11 @@ def _resign(image):
         return image, "signature: not checked (tools/sign7800.py missing)"
     body = image[128:] if len(image) % 0x1000 == 128 else image
     head = image[:len(image) - len(body)]
+    # PAL cartridges are never checked and carry no signature -- the block
+    # is erased EPROM in the retail dumps -- so signing one writes 120
+    # bytes over filler and changes the CRC for nothing
+    if sign7800.region(image) == "pal":
+        return image, "signature: not needed, this is a PAL cartridge"
     try:
         return head + sign7800.signed(body),             "signature: valid for a real NTSC 7800"
     except sign7800.SignError as e:
