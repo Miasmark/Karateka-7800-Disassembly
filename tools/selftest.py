@@ -1668,8 +1668,8 @@ def t_asm_names():
     The assembler used to take a second definition silently and resolve every
     reference to it. In Pole Position II a new routine label collided with a
     text table of the same name, and a branch went 322 bytes astray with no
-    error. The same value twice is allowed, because disasm.py writes a label
-    twice when two annotations name one address.
+    error. The same value twice is allowed: disasm.py used to write every
+    named byte block's label twice, and listings made then still exist.
     """
     import asm
 

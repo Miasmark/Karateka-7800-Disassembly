@@ -18,7 +18,8 @@ Supported:
     MNEM.w operand        force absolute where a zero-page form also exists
 
 A name defined twice with different values is an error (the same value
-twice is not: disasm.py can write a label twice at one address).
+twice is not: listings from disasm.py before its fix repeat a block's
+label at the same address).
 
 Usage:
     python asm.py <file.asm> [-o out.bin]
@@ -143,8 +144,8 @@ class Assembler:
         # in the same block sent a branch 322 bytes astray (Pole Position II,
         # checkpoint 84) and nothing said so. A name defined again with a
         # different value is refused. The same value again is harmless and
-        # allowed: disasm.py writes a label twice when two annotations name
-        # one address. Names from an earlier assemble() on this Assembler are
+        # allowed: disasm.py used to write every named byte block's label
+        # twice, and listings made then still exist. Names from an earlier assemble() on this Assembler are
         # left alone -- seeding `sym` is how a caller carries symbols in.
         defined = {}
 

@@ -679,10 +679,13 @@ class Emitter:
         end = parse_loc(blk["end"])[1] if "end" in blk else addr + blk.get("len", 1)
         if blk.get("name"):
             an.labels[(space, addr)] = blk["name"]
-        self.emit_label(w, space, addr)
         typ = blk.get("type", "bytes")
         data = cart.slice(space, addr, end - addr)
         if typ == "words":
+            # byte runs write their own first label (emit_bytes, emit_gfx);
+            # labelling here as well wrote every named byte block's label and
+            # xrefs twice -- harmless to the assembler, noise in the listing
+            self.emit_label(w, space, addr)
             for i in range(0, len(data) - 1, 2):
                 v = data[i] | (data[i + 1] << 8)
                 nm = self.ref_name((space, addr + i), v)
