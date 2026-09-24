@@ -305,7 +305,50 @@ The offset is chosen by where the **anchors** line up, which works identically o
 a pristine and a patched dump. That matters more than it sounds: reading a
 128-byte header as if it were code is an easy way to produce a confident, wrong
 answer, and it is exactly what happened before anchors existed.
-produce a confident, wrong answer.
+
+The one field of a header the patcher does change is an `.a78`'s ROM size, and
+only when an option grows the body (below).
+
+### Growing the cartridge (`patchset/3`)
+
+Some changes need more cartridge than the dump has: a 32K game made into a
+48K one to hold new code and graphics. An option says so:
+
+```json
+"grow": { "size": 49152, "at": "front", "fill": "0xFF" }
+```
+
+- **`at: "front"`** is a linear 7800 cartridge. It ends at `$FFFF`, so a
+  larger one starts lower: the new bytes go before the old, and `base` moves
+  down with them (a 32K body at `$8000` grown to 48K starts at `$4000`).
+  **`at: "end"`** appends, for a system whose cartridges grow upward.
+- **Sections are CPU addresses in the grown body.** One in the new space
+  describes the fill (its CRC32 is of `fill` bytes), so it is checked like
+  any other. A section outside the body in hand is an error that names the
+  option, not a silent write past the end.
+- **The header follows the body.** An `.a78` header's ROM size (bytes 49-52,
+  big-endian) is set to the grown size. Emulators believe that field, and a
+  48K body under a header that still says 32K is mapped wrong. A header whose
+  cartridge type puts anything at `$4000`-`$7FFF`, or banks the image, refuses
+  to grow at the front rather than collide with it. Headerless dumps grow the
+  same way and give the same body.
+- **A grown cartridge is still recognised.** The patcher tries each layout the
+  bundle can produce (the dump's size and base, and each option's grown one)
+  and takes the one where the anchors line up. So `check` on a grown
+  cartridge reports the option as applied, and applying again changes
+  nothing. On an ungrown dump, `check` judges the options against the body as
+  growth would leave it, so an option with sections in the new space reads as
+  applicable.
+- **Options that grow must agree** on `at` and `fill`; the largest size wins.
+  An option that does not grow never changes the size.
+- **The format is `patchset/3`** when any option grows (`write_bundle` sets it).
+  A reader that predates growth refuses the bundle by name instead of
+  applying its sections at the wrong offsets. A `/2` manifest with a `grow` is
+  refused as malformed. Everything else is unchanged, and `/2` bundles still
+  read.
+
+Only growth is supported. Shrinking would throw away bytes some other option
+may stand on, and nothing has needed it.
 
 ## Applying
 
@@ -333,8 +376,9 @@ Karateka fix was withdrawn for putting stance change on a stick direction that
 another part of the game reads as an attack height. Nothing here catches that;
 only reading the code does.
 
-**Length changes.** A section is a fixed extent. Code that grows goes in a
-float.
+**Length changes within the body.** A section is a fixed extent; code that
+grows goes in a float. The body as a whole can grow (above), but a patch never
+moves bytes that are already there.
 
 **Ordering beyond `requires`.** Options are applied dependencies-first and
 otherwise in a stable order. If two options need a specific relative order and

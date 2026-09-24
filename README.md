@@ -325,6 +325,8 @@ for NTSC, `a7800p` for PAL).
 - [Anchored-Bundle-of-Patches](https://github.com/Miasmark/Anchored-Bundle-of-Patches)
   -- the `.abp` format on its own, with the console-specific parts removed.
   Same `patchset/2` format; bundles written by either work in the other.
+  Growing the cartridge (`patchset/3`, see the format doc) is this toolkit's
+  only so far; the standalone reader refuses such a bundle by name.
 
 MIT licensed -- see [LICENSE](LICENSE), and [NOTICE](NOTICE) for what that
 does and does not cover.
