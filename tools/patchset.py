@@ -72,6 +72,7 @@ import io
 import json
 import os
 import sys
+import tempfile
 import zipfile
 import zlib
 
@@ -915,10 +916,210 @@ def write_bundle(out, manifest, files):
         raise PatchSetError("these files are not named by the manifest: "
                             + ", ".join(spare))
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr("patchset.json", json.dumps(manifest, indent=2) + "\n")
+        z.writestr(_member("patchset.json"), json.dumps(manifest, indent=2) + "\n")
         for name in sorted(files):
-            z.writestr(name, files[name])
+            z.writestr(_member(name), files[name])
     return out
+
+
+def _member(name):
+    """A zip entry whose header says nothing about when or where it was made.
+
+    writestr() with a bare name stamps the current time and the writing OS,
+    so rebuilding a bundle from the same manifest and patches gave a
+    different file every time -- a published bundle could not be reproduced,
+    and every regeneration showed up as a change. Fixed to the zip epoch,
+    Unix, mode 644: the same inputs now give the same bytes.
+    """
+    info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+    info.compress_type = zipfile.ZIP_DEFLATED
+    info.create_system = 3
+    info.external_attr = 0o644 << 16
+    return info
+
+
+# ------------------------------------------------------------------ building
+def runs(addrs, gap=1):
+    """Addresses -> sorted (start, length) runs, merging gaps of <= `gap`."""
+    addrs = sorted(addrs)
+    out, i = [], 0
+    while i < len(addrs):
+        j = i
+        while j + 1 < len(addrs) and addrs[j + 1] - addrs[j] <= gap:
+            j += 1
+        out.append((addrs[i], addrs[j] - addrs[i] + 1))
+        i = j + 1
+    return out
+
+
+def pick_anchors(body, base, busy, n=4, size=256, spread=None):
+    """Extents of `body` that no range in `busy` touches, to identify it by.
+
+    `busy` is (addr, length) pairs: every section of the bundle, and anything
+    else the anchors must stay off -- another bundle's bytes, say, so a
+    cartridge carrying that one is still recognised and a clash is reported
+    as the section it is rather than as "another game". Anchor i is the
+    first clean `size`-byte extent at or after (2i+1)/2n of the way through
+    `spread` (default: the whole body), with at least 32 distinct byte values:
+    a run of one value proves nothing. The search wraps round to the start
+    when it runs out, which only a small body needs.
+    """
+    lo, hi = spread or (0, len(body))
+    taken = [(a - base, a - base + n_) for a, n_ in busy]
+    out = []
+    for i in range(n):
+        start = lo + ((hi - lo) * (2 * i + 1)) // (2 * n)
+        for at in list(range(start, hi - size)) + list(range(lo, start)):
+            if any(not (at + size <= a or b <= at) for a, b in taken):
+                continue
+            chunk = bytes(body[at:at + size])
+            if len(set(chunk)) < 32:
+                continue
+            out.append({"addr": "0x%04X" % (at + base), "length": size,
+                        "crc32": "0x%08X" % crc32(chunk)})
+            taken.append((at, at + size))
+            break
+    if len(out) < n:
+        raise PatchSetError("found only %d of %d anchors clear of every "
+                            "section" % (len(out), n))
+    return out
+
+
+def bundle_from_images(out, dump, base, options, name, what="", target=None,
+                       grow=None, avoid=(), gap=4):
+    """Write a bundle from what each option's cartridge should look like.
+
+    `dump` is the target's body (no header), with CPU address `base` at
+    dump[0]. Each option is a dict: `id`, `title`, and `image` -- the whole
+    body with this option applied, and with `on` applied under it if given
+    ("on": another option's id, which this one is built on). Anything else in
+    the dict (note, knob, requires, ...) goes into the manifest as it is.
+
+    `grow`, if given, is {"size", "at", "fill"} as in the manifest: `dump` is
+    grown that way first, and every image is expected at the grown size. The
+    options that need the room are those whose image differs from the dump
+    in it (or, for simplicity, every option not `on` another).
+
+    What this works out, so a game's generator does not have to:
+
+    - **Sections**: every byte any option changes from the image beneath it,
+      in runs merged across gaps of up to `gap`, each with the CRC32 of the
+      dump's (grown) bytes.
+    - **Spans**: sections grouped by the set of options that change them.
+      Each option gets one patch per group it is in, from the image beneath
+      it to its own. So an option and the one it is built on share a span
+      exactly where both change bytes, which is how the patcher reads the
+      dependency and recognises a cartridge carrying both.
+    - **Anchors**: clear of every section and of `avoid`, (addr, length)
+      ranges other bundles use.
+
+    Then it checks itself: every option applied to `dump` must give its
+    image, and every `on` must be read back as a dependency. A bundle that
+    cannot reproduce what it was built from is refused before it is written.
+    """
+    dump = bytes(dump)
+    body0, base0 = dump, base
+    if grow:
+        size, at = h(grow["size"]), grow.get("at", "front")
+        pad = bytes([h(grow.get("fill"), 0xFF) & 0xFF]) * (size - len(dump))
+        body0 = pad + dump if at == "front" else dump + pad
+        base0 = base - len(pad) if at == "front" else base
+    ids = [o["id"] for o in options]
+    by_id = {o["id"]: o for o in options}
+    if len(set(ids)) != len(ids):
+        raise PatchSetError("option ids repeat: %s" % ", ".join(ids))
+
+    def beneath(o):
+        on = o.get("on")
+        if on is None:
+            return body0
+        if on not in by_id:
+            raise PatchSetError("%s is on %r, which is not an option here"
+                                % (o["id"], on))
+        return bytes(by_id[on]["image"])
+
+    changed = {}
+    for o in options:
+        img, low = bytes(o["image"]), beneath(o)
+        if len(img) != len(body0):
+            raise PatchSetError("%s's image is %d bytes, not %d"
+                                % (o["id"], len(img), len(body0)))
+        changed[o["id"]] = {i + base0 for i in range(len(img)) if img[i] != low[i]}
+    every = set().union(*changed.values()) if changed else set()
+    if not every:
+        raise PatchSetError("no option changes anything")
+
+    sections, groups = {}, {}
+    for at, n in runs(every, gap):
+        sid = "s_%04X" % at
+        sections[sid] = {"addr": "0x%04X" % at, "length": n,
+                         "crc32": "0x%08X" % crc32(body0[at - base0:at - base0 + n])}
+        here = set(range(at, at + n))
+        who = frozenset(o for o in ids if changed[o] & here)
+        groups.setdefault(who, []).append(sid)
+
+    files, manifest_options = {}, []
+    for o in options:
+        mine = [sorted(g, key=lambda s: h(sections[s]["addr"]))
+                for who, g in groups.items() if o["id"] in who]
+        mine.sort(key=lambda g: h(sections[g[0]]["addr"]))
+        img, low = bytes(o["image"]), beneath(o)
+        patches = []
+        for g in mine:
+            pre, post = bytearray(), bytearray()
+            for sid in g:
+                a, n = h(sections[sid]["addr"]) - base0, sections[sid]["length"]
+                pre += low[a:a + n]
+                post += img[a:a + n]
+            member = ("p/%s.bps" % o["id"] if len(mine) == 1
+                      else "p/%s.%s.bps" % (o["id"], g[0]))
+            files[member] = bps.create(bytes(pre), bytes(post))
+            patches.append({"sections": g, "bps": member,
+                            "before": "0x%08X" % crc32(bytes(pre))})
+        m = {k: v for k, v in o.items() if k not in ("image", "on")}
+        if o.get("on"):
+            m["requires"] = sorted(set(m.get("requires", [])) | {o["on"]})
+        if grow and not o.get("on"):
+            m["grow"] = dict(grow)
+        m["patches"] = patches
+        manifest_options.append(m)
+
+    busy = [(h(s["addr"]), s["length"]) for s in sections.values()] + list(avoid)
+    anchors = pick_anchors(dump, base, busy)
+    tgt = dict(target or {})
+    tgt.setdefault("body_size", len(dump))
+    tgt.setdefault("body_sha256", hashlib.sha256(dump).hexdigest())
+    tgt.setdefault("headers", [0, A78_HEADER])
+    tgt["base"] = "0x%04X" % base
+    tgt["anchors"] = anchors
+    manifest = {"format": FORMAT, "name": name, "target": tgt,
+                "sections": sections, "options": manifest_options}
+    if what:
+        manifest["what"] = what
+
+    # check before writing: a bundle that cannot rebuild its own images is
+    # worse than none
+    scratch = tempfile.mkdtemp(prefix="patchset-")
+    probe = write_bundle(os.path.join(scratch, "check.abp"),
+                         json.loads(json.dumps(manifest)), files)
+    ps = PatchSet(probe)
+    derived, unknown = ps.derived_requires()
+    if unknown:
+        raise PatchSetError("built on states the bundle does not describe: %r"
+                            % unknown)
+    for o in options:
+        got = PatchSet(probe).apply(dump, [o["id"]])
+        if got != bytes(o["image"]):
+            diff = next(i for i in range(min(len(got), len(o["image"])))
+                        if got[i] != o["image"][i]) if len(got) == len(o["image"]) else None
+            raise PatchSetError(
+                "%s applied to the dump does not give its image%s"
+                % (o["id"], "" if diff is None else " (first difference at $%04X)"
+                   % (diff + base0)))
+        if o.get("on") and o["on"] not in ps.needs(o["id"]):
+            raise PatchSetError("%s is on %s, but nothing in the patches says so"
+                                % (o["id"], o["on"]))
+    return write_bundle(out, manifest, files)
 
 
 # ------------------------------------------------------------------------ CLI

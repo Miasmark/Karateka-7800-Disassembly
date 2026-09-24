@@ -375,6 +375,52 @@ Some changes need more cartridge than the dump has: a 32K game made into a
 Only growth is supported. Shrinking would throw away bytes some other option
 may stand on, and nothing has needed it.
 
+## Making a bundle
+
+A generator that already builds the finished cartridge for each option
+should not have to work out the bundle's structure by hand. Getting that
+right took Pole Position II several wrong turns. `bundle_from_images` works
+it out from the dump and one finished image per option:
+
+```python
+import patchset
+patchset.bundle_from_images(
+    "dist/game.abp", dump, 0x8000,                     # the body, and its CPU base
+    [{"id": "vs",   "title": "...", "image": vs_image},
+     {"id": "hi",   "title": "...", "image": hi_image, "on": "vs"}],
+    "Game: fixes",
+    target={"what": "Game (NTSC).a78", "region": "ntsc"},
+    grow={"size": 49152, "at": "front", "fill": "0xFF"},   # if it needs room
+    avoid=[(0xEDE3, 5)])                               # another bundle's bytes
+```
+
+Each `image` is the whole body with that option applied. With `on`, it is
+built on another option, so the image includes that option too. The builder
+works out four things:
+
+- **Sections.** Every byte an option changes from the image beneath it, in
+  runs merged across small gaps, each with the CRC32 of the dump's bytes (or
+  the fill, in space the cartridge grows into).
+- **Spans.** Sections are grouped by the set of options that change them, and
+  each option gets one patch per group it is in. An option and the one it
+  is built on therefore share a span exactly where both change bytes. That
+  is what makes the dependency readable from the checksums, and a cartridge
+  carrying both recognisable as such.
+- **Anchors.** They avoid every section and every `avoid` range. Give it the
+  bytes of other bundles for the same game: a cartridge carrying one of them
+  is then still recognised, and a clash is reported as the section it is,
+  not as "another game".
+- **Growth.** The options not built on another carry the `grow`.
+
+Before writing, it applies every option to the dump and refuses unless the
+result is that option's image, and unless every `on` reads back as a
+dependency. `runs` and `pick_anchors` are there on their own for generators
+that build manifests themselves.
+
+**The same inputs give the same file.** Every zip member's header carries a
+fixed date and system, so a rebuilt bundle is byte-identical and its hash
+can be published.
+
 ## Applying
 
 ```
