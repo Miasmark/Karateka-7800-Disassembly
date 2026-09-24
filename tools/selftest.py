@@ -1861,6 +1861,25 @@ def t_patchset():
         raise AssertionError(
             "louder was applied without loud beneath it, so the derived "
             "dependency was found and then ignored")
+    # on the untouched dump, louder reads as applicable -- after loud, which
+    # apply brings along -- not as "something else edited its bytes"
+    ps2u = patchset.PatchSet(out2)
+    _hu, bu = ps2u.find_body(body)
+    if ps2u.survey(bu).get("louder") != "applies":
+        raise AssertionError("an option built on another reads as %r on the "
+                             "dump both apply to" % ps2u.survey(bu).get("louder"))
+    # ...and the chained result is recognised: loud is on it, underneath
+    # louder, so a survey calls both applied and applying again is a no-op
+    # (it once read loud as "blocked" and refused the cartridge it had made)
+    ps2c = patchset.PatchSet(out2)
+    _hc, bc = ps2c.find_body(chained)
+    st = ps2c.survey(bc)
+    if st.get("loud") != "applied" or st.get("louder") != "applied":
+        raise AssertionError("a chained result reads as %r; both options "
+                             "are on it" % ({k: st.get(k) for k in ("loud", "louder")},))
+    if patchset.PatchSet(out2).apply(chained, ["louder"]) != chained:
+        raise AssertionError("applying a chain a second time changed the "
+                             "cartridge")
     try:
         ps2.apply(body, ["orphan"])
     except patchset.PatchSetError as e:

@@ -110,6 +110,18 @@ def crc32(data):
     return zlib.crc32(data) & 0xFFFFFFFF
 
 
+def crc32_combine(crc_a, crc_b, len_b):
+    """crc32(a + b) from crc32(a), crc32(b) and len(b), without the bytes.
+
+    CRC32's register is linear: running b from register r gives Z(r) ^ R(b),
+    where Z is `len_b` zero bytes. So crc(a+b) = crc(b) ^ Z(crc(a)), and
+    Z(x) is zlib's CRC of that many zeros started from x (its init and final
+    XOR cancel out). How a span's pre-image CRC follows from its sections'.
+    """
+    z = zlib.crc32(bytes(len_b), crc_a ^ 0xFFFFFFFF) ^ 0xFFFFFFFF
+    return (crc_b ^ z) & 0xFFFFFFFF
+
+
 class PatchSet(object):
     """A manifest plus the files it names, from a directory or a zip."""
 
@@ -334,6 +346,14 @@ class PatchSet(object):
         return sorted({s for sids, _b, _v, _c in self.entries(option)
                        for s in sids})
 
+    def span_crc(self, sids):
+        """The CRC32 of a span's pre-image, from its sections' CRCs alone."""
+        crc = 0
+        for sid in sids:
+            s = self.sections[sid]
+            crc = crc32_combine(crc, h(s["crc32"]), s["length"])
+        return crc
+
     def span_bytes(self, body, sids):
         """A span's bytes, concatenated, plus where each piece came from."""
         where, data = [], bytearray()
@@ -376,7 +396,57 @@ class PatchSet(object):
                 probe[i] = 0xFF
         if crc32(bytes(probe)) == tgt:
             return "applied"
+        # A patch built on this one's result may have been applied on top:
+        # then the span holds *its* target, and this patch is applied
+        # underneath it. Follow the chain back from what is there. Without
+        # this, a chained result reads the lower option as "blocked", and
+        # applying the same selection again refuses a cartridge it made.
+        if tgt in self._chain_back(sids, crc32(bytes(data))):
+            return "applied"
         return "blocked"
+
+    def _closure(self, option):
+        """Every option this one needs, directly or through another."""
+        seen, todo = set(), [option]
+        while todo:
+            for r in self.needs(todo.pop()):
+                if r not in seen:
+                    seen.add(r)
+                    todo.append(r)
+        return seen
+
+    def _chain_forward(self, sids, crc, options):
+        """Every state these options' patches over the span can take it to."""
+        fwd = {}
+        for o in options:
+            for e_sids, member, _v, _b in self.entries(o):
+                if e_sids == tuple(sids):
+                    src, tgt = self.crcs(member)
+                    fwd.setdefault(src, set()).add(tgt)
+        seen, todo = {crc}, [crc]
+        while todo:
+            for tgt in fwd.get(todo.pop(), ()):
+                if tgt not in seen:
+                    seen.add(tgt)
+                    todo.append(tgt)
+        return seen
+
+    def _chain_back(self, sids, crc):
+        """Every state this span passed through on the way to `crc`, by
+        following each patch over the span from its target to its source."""
+        back = {}
+        for o in self.options:
+            for e_sids, member, _v, _b in self.entries(o):
+                if e_sids == tuple(sids):
+                    src, tgt = self.crcs(member)
+                    back.setdefault(tgt, set()).add(src)
+        seen, todo = set(), [crc]
+        while todo:
+            for src in back.get(todo.pop(), ()):
+                if src not in seen:
+                    seen.add(src)
+                    todo.append(src)
+        return seen
 
     def float_ok(self, body, f):
         """Is this float's blob really the one at the address it was given?
@@ -444,14 +514,17 @@ class PatchSet(object):
         section, or spanning several, costs nothing: a patch changes only the
         bytes it means to however much it covers.
         """
-        produced, pristine = {}, {}
+        produced = {}
         for o in self.options:
-            for sids, member, _v, before in self.entries(o):
-                pristine[sids] = before
+            for sids, member, _v, _before in self.entries(o):
                 produced.setdefault((sids, self.crcs(member)[1]),
                                     set()).add(o)
-        for sids, before in pristine.items():
-            produced.setdefault((sids, before), set())
+                # the pre-image, caused by nobody: from the sections' own
+                # CRCs, not from a patch's `before`. Taking it from `before`
+                # kept whichever patch over the span came last, so once two
+                # options shared a span, the first one's start looked like a
+                # state nothing produces.
+                produced.setdefault((sids, self.span_crc(sids)), set())
         requires, unknown = {}, {}
         for o in self.options:
             deps = set()
@@ -488,6 +561,32 @@ class PatchSet(object):
         for o in self.options:
             if self.entries(o):
                 out[o] = self.option_state(body, o)
+        # An option built on another's result reads as blocked until that one
+        # has run -- which `apply` does first. For the report, it applies if
+        # each blocked span of it gets to its starting point through patches
+        # of the options it needs, and those can apply themselves.
+        changed = True
+        while changed:
+            changed = False
+            for o, st in out.items():
+                if st != "blocked":
+                    continue
+                deps = self._closure(o)
+                if not all(out.get(d, "applies") in ("applies", "applied")
+                           for d in deps):
+                    continue
+                ok = True
+                for e in self.entries(o):
+                    if self.entry_state(body, e) != "blocked":
+                        continue
+                    sids, member = e[0], e[1]
+                    now = crc32(bytes(self.span_bytes(body, sids)[1]))
+                    if self.crcs(member)[0] not in self._chain_forward(sids, now, deps):
+                        ok = False
+                        break
+                if ok:
+                    out[o] = "applies"
+                    changed = True
         on = {o for o, st in out.items() if st == "applied"}
         knobs_on = {self.options[o].get("knob") for o in on}
         knobs_on.discard(None)

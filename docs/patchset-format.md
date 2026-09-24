@@ -224,6 +224,31 @@ before the test caught it:
   against the section's original CRC -- and against the cartridge as it stands
   when the option's turn comes, not as it arrived.
 
+Three more came with the first real chain, Pole Position II VS, where a second
+option (a redrawn car) shares nine sections with the first (the VS build) and
+changes bytes the first one wrote:
+
+- **The pre-image of a span comes from its sections**, not from a patch's
+  `before`. The sections' CRC32s are the pristine bytes by definition, and a
+  span's CRC follows from them without the bytes (`crc32_combine`: CRC32 is
+  linear, so `crc(a+b)` is `crc(b)` XOR `crc(a)` run through `len(b)` zero
+  bytes). Taking it from `before` kept whichever patch over the span came
+  last. Once two options shared a span, the first one's starting point looked
+  like "a ROM the bundle does not describe", and the first option was refused.
+- **A patch is applied underneath one built on it.** Once the second option
+  is on, the shared span holds its target, not the first option's. Following
+  the chain back from what is there (target to source, patch by patch) finds
+  the first option's target, so it reads as applied. Without that, `check`
+  called the first option blocked on a cartridge the bundle had made, and
+  applying the same selection again refused it.
+- **In a report, a chained option applies if its predecessors do.** On the
+  untouched dump the second option's span holds the pristine bytes, not its
+  source. It still applies, because `apply` runs the first option before it.
+  `check` follows the chain forward through the patches of the options it
+  needs, and calls it applicable when that reaches its source and those
+  options can apply themselves. `apply` itself still judges each option
+  strictly, when its turn comes.
+
 A patch whose source CRC matches nothing in the bundle was built against a ROM
 the bundle does not describe. There is no order that makes it apply, so it is
 refused by name rather than left to fail later.
